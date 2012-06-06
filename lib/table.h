@@ -50,6 +50,9 @@ struct route_node
 
   /* Aggregation. */
   void *aggregate;
+
+  /* MPLS label bindings. */
+  void *mpls;
 };
 
 /* Prototypes. */

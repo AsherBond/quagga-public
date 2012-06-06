@@ -42,6 +42,14 @@
 #include "zebra/redistribute.h"
 #include "zebra/interface.h"
 #include "zebra/debug.h"
+#ifdef HAVE_MPLS
+#include <linux/mpls.h>
+#include <linux/shim.h>
+#include "zebra/mpls_lib.h"
+#endif
+
+#define NLMSG_TAIL(nmsg) \
+	((struct rtattr *) (((char *) (nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
 
 #define NL_PKT_BUF_SIZE 4096
 
@@ -1474,6 +1482,34 @@ netlink_route_multipath (int cmd, struct prefix *p, struct rib *rib,
         }
       else
         req.r.rtm_type = RTN_UNICAST;
+
+#if defined(HAVE_MPLS) && defined(LINUX_MPLS)
+      /* MPLS Fec to NHLFE (FTN).  */
+      {
+        struct route_table *table;
+        struct route_node *rn;
+        struct label_bindings *lb;
+        char buf[sizeof (struct rtshim) + sizeof (unsigned int)];
+        struct rtshim *shim;
+
+        table = vrf_table (AFI_IP, SAFI_UNICAST, 0);
+        if (! table)
+          goto skip;
+
+        rn = route_node_get (table, p);
+        lb = rn->mpls;
+        if (lb && lb->selected_lsp)
+          {
+            shim = (struct rtshim *) buf;
+            strcpy (shim->name, "mpls");
+            memcpy (shim->data, &lb->selected_lsp->nhlfe_index,
+                    sizeof (unsigned int));
+            shim->datalen = sizeof (unsigned int);
+            addattr_l (&req.n, sizeof (req), RTA_SHIM, shim,
+                       sizeof (struct rtshim) + sizeof (unsigned int));
+          }
+      }
+#endif /* HAVE_MPLS && LINUX_MPLS */
     }
 
   addattr_l (&req.n, sizeof req, RTA_DST, &p->u.prefix, bytelen);

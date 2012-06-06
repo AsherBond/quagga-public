@@ -1,5 +1,3 @@
-/*	$OpenBSD: imsg.c,v 1.1 2010/05/26 16:44:32 nicm Exp $	*/
-
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
  *
@@ -25,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "memory.h"
 
 #include "imsg.h"
 
@@ -78,10 +78,7 @@ imsg_read(struct imsgbuf *ibuf)
 		if (cmsg->cmsg_level == SOL_SOCKET &&
 		    cmsg->cmsg_type == SCM_RIGHTS) {
 			fd = (*(int *)CMSG_DATA(cmsg));
-			if ((ifd = calloc(1, sizeof(struct imsg_fd))) == NULL) {
-				close(fd);
-				return (-1);
-			}
+			ifd = XCALLOC(MTYPE_LDP, sizeof(struct imsg_fd));
 			ifd->fd = fd;
 			TAILQ_INSERT_TAIL(&ibuf->fds, ifd, entry);
 		}
@@ -111,9 +108,8 @@ imsg_get(struct imsgbuf *ibuf, struct imsg *imsg)
 		return (0);
 	datalen = imsg->hdr.len - IMSG_HEADER_SIZE;
 	ibuf->r.rptr = ibuf->r.buf + IMSG_HEADER_SIZE;
-	if ((imsg->data = malloc(datalen)) == NULL)
-		return (-1);
 
+	imsg->data = XMALLOC(MTYPE_LDP, datalen);
 	if (imsg->hdr.flags & IMSGF_HASFD)
 		imsg->fd = imsg_get_fd(ibuf);
 	else
@@ -232,7 +228,7 @@ imsg_close(struct imsgbuf *ibuf, struct ibuf *msg)
 void
 imsg_free(struct imsg *imsg)
 {
-	free(imsg->data);
+	XFREE(MTYPE_LDP, imsg->data);
 }
 
 int
@@ -246,7 +242,7 @@ imsg_get_fd(struct imsgbuf *ibuf)
 
 	fd = ifd->fd;
 	TAILQ_REMOVE(&ibuf->fds, ifd, entry);
-	free(ifd);
+	XFREE(MTYPE_LDP, ifd);
 
 	return (fd);
 }

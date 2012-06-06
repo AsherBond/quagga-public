@@ -1,5 +1,3 @@
-/*	$OpenBSD: lde.h,v 1.18 2010/11/04 09:49:07 claudio Exp $ */
-
 /*
  * Copyright (c) 2004, 2005 Esben Norby <norby@openbsd.org>
  *
@@ -19,12 +17,7 @@
 #ifndef _LDE_H_
 #define _LDE_H_
 
-#include <sys/types.h>
-#include <sys/time.h>
-#include <sys/tree.h>
-#include <sys/queue.h>
-#include <event.h>
-#include <limits.h>
+#define MPLS_LABEL_IMPLNULL 3
 
 RB_HEAD(fec_tree, fec);
 
@@ -41,7 +34,7 @@ struct fec {
  */
 struct lde_req {
 	struct fec		fec;
-	u_int32_t		msgid;	
+	u_int32_t		msgid;
 };
 
 /* mapping entries */
@@ -73,46 +66,48 @@ struct lde_nbr {
 	u_int32_t			 peerid;
 	unsigned int			 ifindex;
 	int				 state;
-
-	u_int16_t			 lspace;
 };
 
 struct rt_lsp {
-	LIST_ENTRY(rt_lsp)	entry;
-
 	struct in_addr		nexthop;
 	u_int32_t		remote_label;
-	u_int8_t		priority;
 };
 
 struct rt_node {
 	struct fec		fec;
 
-	LIST_HEAD(, rt_lsp)	lsp;		/* label switching pathes */
+	struct rt_lsp		lsp;		/* label switching path */
 	LIST_HEAD(, lde_map)	downstream;	/* recv mappings */
 	LIST_HEAD(, lde_map)	upstream;	/* sent mappings */
 
 	u_int32_t		local_label;
-	u_int16_t		lspace;
-	u_int8_t		flags;
+	u_int32_t		assigned_local_label;
+	u_char			connected;
 };
 
 /* lde.c */
-pid_t		lde(struct ldpd_conf *, int [2], int [2], int [2]);
-int		lde_imsg_compose_ldpe(int, u_int32_t, pid_t, void *, u_int16_t);
-u_int32_t	lde_assign_label(void);
+void		lde(void);
+void		lde_process(int type, u_int32_t peerid, void *data, u_int16_t datalen);
 
-void	lde_send_change_klabel(struct rt_node *, struct rt_lsp *);
-void	lde_send_delete_klabel(struct rt_node *, struct rt_lsp *);
+void	lde_zebra_change_input_label(struct rt_node *);
+void	lde_zebra_add_lsp(struct rt_node *);
+void	lde_zebra_delete_lsp(struct rt_node *);
+
 void	lde_send_labelmapping(struct lde_nbr *, struct rt_node *);
+void	lde_send_labelwithdraw(struct lde_nbr *, struct rt_node *);
 void	lde_send_labelrequest(struct lde_nbr *, struct rt_node *);
 void	lde_send_labelrelease(struct lde_nbr *, struct rt_node *, u_int32_t);
 void	lde_send_notification(u_int32_t, u_int32_t, u_int32_t, u_int32_t);
 
+struct lde_nbr *lde_nbr_find(u_int32_t);
+void		lde_nbr_clear(void);
 void		lde_nbr_del(struct lde_nbr *);
+void		lde_recognize_new_fec(struct rt_node *);
 void		lde_nbr_do_mappings(struct rt_node *);
+void		lde_nbr_do_withdraws(struct rt_node *);
 struct lde_map *lde_map_add(struct lde_nbr *, struct rt_node *, int);
 void		lde_map_del(struct lde_nbr *, struct lde_map *, int);
+struct lde_map *lde_withdraw_add(struct lde_nbr *, struct rt_node *);
 struct lde_req *lde_req_add(struct lde_nbr *, struct fec *, int);
 void		lde_req_del(struct lde_nbr *, struct lde_req *, int);
 struct lde_nbr *lde_find_address(struct in_addr);
@@ -130,12 +125,14 @@ struct fec	*fec_find_prefix(struct fec_tree *, in_addr_t, u_int8_t);
 struct fec	*fec_find(struct fec_tree *, struct fec *);
 void		 fec_clear(struct fec_tree *, void (*)(void *));
 
-void		 rt_dump(pid_t);
 void		 rt_snap(struct lde_nbr *);
 void		 rt_clear(void);
+struct rt_node	*rt_get(struct in_addr, u_int8_t);
+u_char		 lsr_egress_for_fec(struct rt_node *);
 
 void		 lde_kernel_insert(struct kroute *);
 void		 lde_kernel_remove(struct kroute *);
+void		 lde_kernel_change_input_label(struct kroute *);
 void		 lde_check_mapping(struct map *, struct lde_nbr *);
 void		 lde_check_request(struct map *, struct lde_nbr *);
 void		 lde_check_release(struct map *, struct lde_nbr *);

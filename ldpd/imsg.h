@@ -1,5 +1,3 @@
-/*	$OpenBSD: imsg.h,v 1.2 2010/06/23 07:53:55 nicm Exp $	*/
-
 /*
  * Copyright (c) 2006, 2007 Pierre-Yves Ritschard <pyr@openbsd.org>
  * Copyright (c) 2006, 2007, 2008 Reyk Floeter <reyk@openbsd.org>

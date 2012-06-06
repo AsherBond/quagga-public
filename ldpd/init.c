@@ -1,5 +1,3 @@
-/*	$OpenBSD: init.c,v 1.7 2011/01/10 12:02:48 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  *
@@ -16,26 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/if_dl.h>
-#include <unistd.h>
-
-#include <errno.h>
-#include <event.h>
-#include <stdlib.h>
-#include <string.h>
+#include <zebra.h>
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
+#include "ldp_debug.h"
 
 int	gen_init_prms_tlv(struct ibuf *, struct nbr *, u_int16_t);
 int	tlv_decode_opt_init_prms(char *, u_int16_t);
@@ -49,7 +32,7 @@ send_init(struct nbr *nbr)
 	if (nbr->iface->passive)
 		return;
 
-	log_debug("send_init: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_send("send_init: neighbor ID %s", inet_ntoa(nbr->id));
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
 		fatal("send_init");
@@ -60,7 +43,7 @@ send_init(struct nbr *nbr)
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_INIT, size);
+	gen_msg_tlv(nbr, buf, MSG_TYPE_INIT, size);
 
 	size -= sizeof(struct ldp_msg);
 
@@ -75,7 +58,7 @@ recv_init(struct nbr *nbr, char *buf, u_int16_t len)
 	struct ldp_msg		init;
 	struct sess_prms_tlv	sess;
 
-	log_debug("recv_init: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_recv("recv_init: neighbor ID %s", inet_ntoa(nbr->id));
 
 	bcopy(buf, &init, sizeof(init));
 
@@ -103,8 +86,8 @@ recv_init(struct nbr *nbr, char *buf, u_int16_t len)
 		return (-1);
 	}
 
-	if (nbr->iface->keepalive < ntohs(sess.keepalive_time))
-		nbr->keepalive = nbr->iface->keepalive;
+	if (ldpd_conf->keepalive < ntohs(sess.keepalive_time))
+		nbr->keepalive = ldpd_conf->keepalive;
 	else
 		nbr->keepalive = ntohs(sess.keepalive_time);
 
@@ -125,7 +108,7 @@ gen_init_prms_tlv(struct ibuf *buf, struct nbr *nbr, u_int16_t size)
 	parms.type = htons(TLV_TYPE_COMMONSESSION);
 	parms.length = htons(size);
 	parms.proto_version = htons(LDP_VERSION);
-	parms.keepalive_time = htons(nbr->iface->keepalive);
+	parms.keepalive_time = htons(ldpd_conf->keepalive);
 	parms.reserved = 0;
 	parms.pvlim = 0;
 	parms.max_pdu_len = 0;
@@ -148,10 +131,10 @@ tlv_decode_opt_init_prms(char *buf, u_int16_t len)
 		tlv_len = ntohs(tlv.length);
 		switch (ntohs(tlv.type)) {
 		case TLV_TYPE_ATMSESSIONPAR:
-			log_warnx("ATM session parameter present");
+			zlog_warn("ATM session parameter present");
 			return (-1);
 		case TLV_TYPE_FRSESSION:
-			log_warnx("FR session parameter present");
+			zlog_warn("FR session parameter present");
 			return (-1);
 		default:
 			/* if unknown flag set, ignore TLV */

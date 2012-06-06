@@ -1,5 +1,3 @@
-/*	$OpenBSD: labelmapping.c,v 1.19 2011/01/10 11:52:04 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  *
@@ -16,27 +14,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
+#include <zebra.h>
 
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/if_dl.h>
-#include <unistd.h>
-
-#include <errno.h>
-#include <event.h>
-#include <limits.h>
-#include <stdlib.h>
-#include <string.h>
+#include "memory.h"
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
+#include "lde.h"
+#include "ldp_debug.h"
 
 void		gen_label_tlv(struct ibuf *, u_int32_t);
 void		gen_reqid_tlv(struct ibuf *, u_int32_t);
@@ -47,16 +32,32 @@ int	tlv_decode_reqid(char *, u_int16_t, u_int32_t *);
 int	tlv_decode_fec_elm(char *, u_int16_t, u_int8_t *, u_int32_t *,
 	    u_int8_t *);
 
+static void
+enqueue_pdu(struct nbr *nbr, struct ibuf *buf, u_int16_t size)
+{
+	struct ldp_hdr *ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
+
+	ldp_hdr->length = htons(size);
+
+	evbuf_enqueue(&nbr->wbuf, buf);
+}
+
 /* Label Mapping Message */
 void
 send_labelmapping(struct nbr *nbr)
 {
 	struct ibuf		*buf;
 	struct mapping_entry	*me;
-	struct ldp_hdr		*ldp_hdr;
 	u_int16_t		 tlv_size, size;
 
 	if (nbr->iface->passive)
+		return;
+
+	log_pkt_send("send_labelmapping: iface %s neighbor ID %s", nbr->iface->name,
+	    inet_ntoa(nbr->id));
+
+restart:
+	if (TAILQ_EMPTY(&nbr->mapping_list))
 		return;
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
@@ -67,26 +68,31 @@ send_labelmapping(struct nbr *nbr)
 
 	size = LDP_HDR_SIZE - TLV_HDR_LEN;
 
-	TAILQ_FOREACH(me, &nbr->mapping_list, entry) {
+	while (!TAILQ_EMPTY(&nbr->mapping_list)) {
+		me = TAILQ_FIRST(&nbr->mapping_list);
 		tlv_size = BASIC_LABEL_MAP_LEN + PREFIX_SIZE(me->map.prefixlen);
 		if (me->map.flags & F_MAP_REQ_ID)
 			tlv_size += REQID_TLV_LEN;
+
+		if (size + tlv_size > LDP_MAX_LEN) {
+			enqueue_pdu(nbr, buf, size);
+			goto restart;
+		}
 		size += tlv_size;
 
-		gen_msg_tlv(buf, MSG_TYPE_LABELMAPPING, tlv_size);
+		gen_msg_tlv(nbr, buf, MSG_TYPE_LABELMAPPING, tlv_size);
 		gen_fec_tlv(buf, me->map.prefix, me->map.prefixlen);
 		gen_label_tlv(buf, me->map.label);
 		if (me->map.flags & F_MAP_REQ_ID)
 			gen_reqid_tlv(buf, me->map.requestid);
+
+		TAILQ_REMOVE(&nbr->mapping_list, me, entry);
+		XFREE(MTYPE_LDP, me);
 	}
 
-	/* XXX: should we remove them first? */
-	nbr_mapping_list_clr(nbr, &nbr->mapping_list);
+	enqueue_pdu(nbr, buf, size);
 
-	ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
-	ldp_hdr->length = htons(size);
-
-	evbuf_enqueue(&nbr->wbuf, buf);
+	nbr_start_ktimer(nbr);
 }
 
 int
@@ -100,7 +106,7 @@ recv_labelmapping(struct nbr *nbr, char *buf, u_int16_t len)
 	u_int8_t		addr_type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_labelmapping: neighbor ID %s not operational",
+		zlog_debug("recv_labelmapping: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
@@ -149,8 +155,7 @@ recv_labelmapping(struct nbr *nbr, char *buf, u_int16_t len)
 			return (-1);
 		}
 
-		ldpe_imsg_compose_lde(IMSG_LABEL_MAPPING, nbr->peerid, 0, &map,
-		    sizeof(map));
+		lde_process(IMSG_LABEL_MAPPING, nbr->peerid, &map, sizeof(map));
 
 		buf += tlen;
 		feclen -= tlen;
@@ -167,10 +172,16 @@ send_labelrequest(struct nbr *nbr)
 {
 	struct ibuf		*buf;
 	struct mapping_entry	*me;
-	struct ldp_hdr		*ldp_hdr;
 	u_int16_t		 tlv_size, size;
 
 	if (nbr->iface->passive)
+		return;
+
+	log_pkt_send("send_labelrequest: iface %s neighbor ID %s", nbr->iface->name,
+	    inet_ntoa(nbr->id));
+
+restart:
+	if (TAILQ_EMPTY(&nbr->request_list))
 		return;
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
@@ -181,21 +192,26 @@ send_labelrequest(struct nbr *nbr)
 
 	size = LDP_HDR_SIZE - TLV_HDR_LEN;
 
-	TAILQ_FOREACH(me, &nbr->request_list, entry) {
+	while (!TAILQ_EMPTY(&nbr->request_list)) {
+		me = TAILQ_FIRST(&nbr->request_list);
 		tlv_size = PREFIX_SIZE(me->map.prefixlen);
+
+		if (size + tlv_size > LDP_MAX_LEN) {
+			enqueue_pdu(nbr, buf, size);
+			goto restart;
+		}
 		size += tlv_size;
 
-		gen_msg_tlv(buf, MSG_TYPE_LABELREQUEST, tlv_size);
+		gen_msg_tlv(nbr, buf, MSG_TYPE_LABELREQUEST, tlv_size);
 		gen_fec_tlv(buf, me->map.prefix, me->map.prefixlen);
+
+		TAILQ_REMOVE(&nbr->request_list, me, entry);
+		XFREE(MTYPE_LDP, me);
 	}
 
-	/* XXX: should we remove them first? */
-	nbr_mapping_list_clr(nbr, &nbr->request_list);
+	enqueue_pdu(nbr, buf, size);
 
-	ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
-	ldp_hdr->length = htons(size);
-
-	evbuf_enqueue(&nbr->wbuf, buf);
+	nbr_start_ktimer(nbr);
 }
 
 int
@@ -208,7 +224,7 @@ recv_labelrequest(struct nbr *nbr, char *buf, u_int16_t len)
 	u_int8_t	addr_type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_labelrequest: neighbor ID %s not operational",
+		zlog_debug("recv_labelrequest: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
@@ -246,8 +262,7 @@ recv_labelrequest(struct nbr *nbr, char *buf, u_int16_t len)
 			return (-1);
 		}
 
-		ldpe_imsg_compose_lde(IMSG_LABEL_REQUEST, nbr->peerid, 0, &map,
-		    sizeof(map));
+		lde_process(IMSG_LABEL_REQUEST, nbr->peerid, &map, sizeof(map));
 
 		buf += tlen;
 		feclen -= tlen;
@@ -264,10 +279,16 @@ send_labelwithdraw(struct nbr *nbr)
 {
 	struct ibuf		*buf;
 	struct mapping_entry	*me;
-	struct ldp_hdr		*ldp_hdr;
 	u_int16_t		 tlv_size, size;
 
 	if (nbr->iface->passive)
+		return;
+
+	log_pkt_send("send_labelwithdraw: iface %s neighbor ID %s", nbr->iface->name,
+	    inet_ntoa(nbr->id));
+
+restart:
+	if (TAILQ_EMPTY(&nbr->withdraw_list))
 		return;
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
@@ -278,29 +299,33 @@ send_labelwithdraw(struct nbr *nbr)
 
 	size = LDP_HDR_SIZE - TLV_HDR_LEN;
 
-	TAILQ_FOREACH(me, &nbr->withdraw_list, entry) {
+	while (!TAILQ_EMPTY(&nbr->withdraw_list)) {
+		me = TAILQ_FIRST(&nbr->withdraw_list);
 		if (me->map.label == NO_LABEL)
 			tlv_size = PREFIX_SIZE(me->map.prefixlen);
 		else
 			tlv_size = BASIC_LABEL_MAP_LEN +
 			    PREFIX_SIZE(me->map.prefixlen);
 
+		if (size + tlv_size > LDP_MAX_LEN) {
+			enqueue_pdu(nbr, buf, size);
+			goto restart;
+		}
 		size += tlv_size;
 
-		gen_msg_tlv(buf, MSG_TYPE_LABELWITHDRAW, tlv_size);
+		gen_msg_tlv(nbr, buf, MSG_TYPE_LABELWITHDRAW, tlv_size);
 		gen_fec_tlv(buf, me->map.prefix, me->map.prefixlen);
 
 		if (me->map.label != NO_LABEL)
 			gen_label_tlv(buf, me->map.label);
+
+		TAILQ_REMOVE(&nbr->withdraw_list, me, entry);
+		XFREE(MTYPE_LDP, me);
 	}
 
-	/* XXX: should we remove them first? */
-	nbr_mapping_list_clr(nbr, &nbr->withdraw_list);
+	enqueue_pdu(nbr, buf, size);
 
-	ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
-	ldp_hdr->length = htons(size);
-
-	evbuf_enqueue(&nbr->wbuf, buf);
+	nbr_start_ktimer(nbr);
 }
 
 int
@@ -314,7 +339,7 @@ recv_labelwithdraw(struct nbr *nbr, char *buf, u_int16_t len)
 	u_int8_t	addr_type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_labelwithdraw: neighbor ID %s not operational",
+		zlog_debug("recv_labelwithdraw: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
@@ -387,8 +412,7 @@ recv_labelwithdraw(struct nbr *nbr, char *buf, u_int16_t len)
 			map.flags &= ~F_MAP_WILDCARD;
 		}
 
-		ldpe_imsg_compose_lde(IMSG_LABEL_WITHDRAW, nbr->peerid, 0, &map,
-		    sizeof(map));
+		lde_process(IMSG_LABEL_WITHDRAW, nbr->peerid, &map, sizeof(map));
 
 		buf += tlen;
 		feclen -= tlen;
@@ -405,10 +429,16 @@ send_labelrelease(struct nbr *nbr)
 {
 	struct ibuf		*buf;
 	struct mapping_entry	*me;
-	struct ldp_hdr		*ldp_hdr;
 	u_int16_t		 tlv_size, size;
 
 	if (nbr->iface->passive)
+		return;
+
+	log_pkt_send("send_labelrelease: iface %s neighbor ID %s", nbr->iface->name,
+	    inet_ntoa(nbr->id));
+
+restart:
+	if (TAILQ_EMPTY(&nbr->release_list))
 		return;
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
@@ -419,29 +449,33 @@ send_labelrelease(struct nbr *nbr)
 
 	size = LDP_HDR_SIZE - TLV_HDR_LEN;
 
-	TAILQ_FOREACH(me, &nbr->release_list, entry) {
+	while (!TAILQ_EMPTY(&nbr->release_list)) {
+		me = TAILQ_FIRST(&nbr->release_list);
 		if (me->map.label == NO_LABEL)
 			tlv_size = PREFIX_SIZE(me->map.prefixlen);
 		else
 			tlv_size = BASIC_LABEL_MAP_LEN +
 			    PREFIX_SIZE(me->map.prefixlen);
 
+		if (size + tlv_size > LDP_MAX_LEN){
+			enqueue_pdu(nbr, buf, size);
+			goto restart;
+		}
 		size += tlv_size;
 
-		gen_msg_tlv(buf, MSG_TYPE_LABELRELEASE, tlv_size);
+		gen_msg_tlv(nbr, buf, MSG_TYPE_LABELRELEASE, tlv_size);
 		gen_fec_tlv(buf, me->map.prefix, me->map.prefixlen);
 
 		if (me->map.label != NO_LABEL)
 			gen_label_tlv(buf, me->map.label);
+
+		TAILQ_REMOVE(&nbr->release_list, me, entry);
+		XFREE(MTYPE_LDP, me);
 	}
 
-	/* XXX: should we remove them first? */
-	nbr_mapping_list_clr(nbr, &nbr->release_list);
+	enqueue_pdu(nbr, buf, size);
 
-	ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
-	ldp_hdr->length = htons(size);
-
-	evbuf_enqueue(&nbr->wbuf, buf);
+	nbr_start_ktimer(nbr);
 }
 
 int
@@ -455,7 +489,7 @@ recv_labelrelease(struct nbr *nbr, char *buf, u_int16_t len)
 	u_int8_t	addr_type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_labelrelease: neighbor ID %s not operational",
+		zlog_debug("recv_labelrelease: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
@@ -527,8 +561,7 @@ recv_labelrelease(struct nbr *nbr, char *buf, u_int16_t len)
 			map.flags &= ~F_MAP_WILDCARD;
 		}
 
-		ldpe_imsg_compose_lde(IMSG_LABEL_RELEASE, nbr->peerid, 0, &map,
-		    sizeof(map));
+		lde_process(IMSG_LABEL_RELEASE, nbr->peerid, &map, sizeof(map));
 
 		buf += tlen;
 		feclen -= tlen;
@@ -549,6 +582,9 @@ send_labelabortreq(struct nbr *nbr)
 	if (nbr->iface->passive)
 		return;
 
+	log_pkt_send("send_labelabortreq: iface %s neighbor ID %s", nbr->iface->name,
+	    inet_ntoa(nbr->id));
+
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
 		fatal("send_labelabortreq");
 
@@ -558,8 +594,9 @@ send_labelabortreq(struct nbr *nbr)
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_LABELABORTREQ, size);
+	gen_msg_tlv(nbr, buf, MSG_TYPE_LABELABORTREQ, size);
 
+	nbr_start_ktimer(nbr);
 	evbuf_enqueue(&nbr->wbuf, buf);
 }
 
@@ -573,12 +610,12 @@ recv_labelabortreq(struct nbr *nbr, char *buf, u_int16_t len)
 	u_int8_t	addr_type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_labelabortreq: neighbor ID %s not operational",
+		zlog_debug("recv_labelabortreq: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
 
-	log_debug("recv_labelabortreq: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_recv("recv_labelabortreq: neighbor ID %s", inet_ntoa(nbr->id));
 
 	bcopy(buf, &la, sizeof(la));
 
@@ -626,8 +663,7 @@ recv_labelabortreq(struct nbr *nbr, char *buf, u_int16_t len)
 			return (-1);
 		}
 
-		ldpe_imsg_compose_lde(IMSG_LABEL_ABORT, nbr->peerid, 0, &map,
-		    sizeof(map));
+		lde_process(IMSG_LABEL_ABORT, nbr->peerid, &map, sizeof(map));
 
 		buf += tlen;
 		feclen -= tlen;

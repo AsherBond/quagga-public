@@ -40,6 +40,9 @@
 #include "zebra/zserv.h"
 #include "zebra/redistribute.h"
 #include "zebra/debug.h"
+#ifdef HAVE_MPLS
+#include "zebra/mpls_lib.h"
+#endif
 
 /* Default rtm_table for all clients */
 extern struct zebra_t zebrad;
@@ -969,6 +972,9 @@ rib_uninstall (struct route_node *rn, struct rib *rib)
       redistribute_delete (&rn->p, rib);
       if (! RIB_SYSTEM_ROUTE (rib))
 	rib_uninstall_kernel (rn, rib);
+#ifdef HAVE_MPLS
+      mpls_route_uninstall_hook (rn);
+#endif
       UNSET_FLAG (rib->flags, ZEBRA_FLAG_SELECTED);
     }
 }
@@ -987,6 +993,9 @@ rib_process (struct route_node *rn)
   int installed = 0;
   struct nexthop *nexthop = NULL;
   char buf[INET6_ADDRSTRLEN];
+#if defined(HAVE_MPLS) && defined(LINUX_MPLS)
+  struct label_bindings *lb;
+#endif
   
   assert (rn);
   
@@ -1102,6 +1111,25 @@ rib_process (struct route_node *rn)
             rib_install_kernel (rn, select);
           redistribute_add (&rn->p, select);
         }
+#if defined(HAVE_MPLS) && defined(LINUX_MPLS)
+      else if (! CHECK_FLAG (select->flags, ZEBRA_FLAG_CHANGED))
+        {
+          lb = rn->mpls;
+          if (lb && lb->selected_lsp != select->lsp
+              && (! RIB_SYSTEM_ROUTE (select)))
+            {
+                select->lsp = lb->selected_lsp;
+
+                if ((! lb->selected_lsp)
+                    || (lb->selected_lsp
+                        && lb->selected_lsp->remote_label != MPLS_IMPLICIT_NULL))
+                  {
+                    rib_uninstall_kernel (rn, select);
+                    rib_install_kernel (rn, select);
+                  }
+            }
+        }
+#endif /* HAVE_MPLS && LINUX_MPLS */
       else if (! RIB_SYSTEM_ROUTE (select))
         {
           /* Housekeeping code to deal with 
@@ -1135,6 +1163,9 @@ rib_process (struct route_node *rn)
       redistribute_delete (&rn->p, fib);
       if (! RIB_SYSTEM_ROUTE (fib))
 	rib_uninstall_kernel (rn, fib);
+#ifdef HAVE_MPLS
+      mpls_route_uninstall_hook (rn);
+#endif
       UNSET_FLAG (fib->flags, ZEBRA_FLAG_SELECTED);
 
       /* Set real nexthop. */
@@ -1156,6 +1187,9 @@ rib_process (struct route_node *rn)
       if (! RIB_SYSTEM_ROUTE (select))
         rib_install_kernel (rn, select);
       SET_FLAG (select->flags, ZEBRA_FLAG_SELECTED);
+#ifdef HAVE_MPLS
+      mpls_route_install_hook (rn);
+#endif
       redistribute_add (&rn->p, select);
     }
 
@@ -1276,7 +1310,7 @@ rib_meta_queue_add (struct meta_queue *mq, struct route_node *rn)
 }
 
 /* Add route_node to work queue and schedule processing */
-static void
+void
 rib_queue_add (struct zebra_t *zebra, struct route_node *rn)
 {
   char buf[INET_ADDRSTRLEN];

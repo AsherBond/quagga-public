@@ -132,7 +132,7 @@ if test "x${cflags_specified}" = "x" ; then
         AC_MSG_RESULT([Intel default])
         ;;
     "GCC")
-  	CFLAGS="-Os -fno-omit-frame-pointer -g -std=gnu99 -Wall"
+	CFLAGS="-Os -fno-omit-frame-pointer -g -std=gnu99 -Wall -I`pwd`/include"
   	CFLAGS="${CFLAGS} -Wsign-compare -Wpointer-arith"
   	CFLAGS="${CFLAGS} -Wbad-function-cast -Wwrite-strings"
   	CFLAGS="${CFLAGS} -Wmissing-prototypes -Wmissing-declarations"
@@ -213,6 +213,10 @@ AC_ARG_ENABLE(watchquagga,
 [  --disable-watchquagga   do not build watchquagga])
 AC_ARG_ENABLE(isisd,
 [  --enable-isisd          build isisd])
+AC_ARG_ENABLE(mpls,
+[  --enable-mpls           turn on MPLS related features and daemons])
+AC_ARG_ENABLE(ldpd,
+[  --disable-ldpd          do not build ldpd])
 AC_ARG_ENABLE(solaris,
 [  --enable-solaris          build solaris])
 AC_ARG_ENABLE(bgp-announce,
@@ -1221,6 +1225,30 @@ else
   DOC="doc"
 fi
 
+dnl ----------
+dnl MPLS check
+dnl ----------
+MPLS_METHOD=""
+AC_MSG_CHECKING(whether this OS has MPLS stack)
+AM_CONDITIONAL(MPLS_ENABLED, test "x${enable_mpls}" != "xno")
+if test "${enable_mpls}" = "no"; then
+  enable_ldpd="no"
+  AC_MSG_RESULT(disabled)
+else
+  if test "x${enable_mpls}" = "xnull"; then
+    AC_DEFINE(HAVE_MPLS,1,Enable MPLS)
+    MPLS_METHOD="mpls_null.o"
+    AC_MSG_RESULT(MPLS Null)
+  else
+    # FIXME: Check MPLS support
+    AC_DEFINE(HAVE_MPLS,1,Enable MPLS)
+    AC_DEFINE(LINUX_MPLS,1,Linux MPLS)
+    MPLS_METHOD="mpls_netlink.o"
+    AC_MSG_RESULT(MPLS Linux)
+  fi
+fi
+AC_SUBST(MPLS_METHOD)
+
 dnl --------------------
 dnl Daemon disable check
 dnl --------------------
@@ -1258,6 +1286,12 @@ else
   BABELD="babeld"
 fi
 AM_CONDITIONAL(BABELD, test "x$BABELD" = "xbabeld")
+
+if test "${enable_ldpd}" = "no";then
+  LDPD=""
+else
+  LDPD="ldpd"
+fi
 
 if test "${enable_watchquagga}" = "no";then
   WATCHQUAGGA=""
@@ -1321,6 +1355,7 @@ AC_SUBST(RIPNGD)
 AC_SUBST(OSPFD)
 AC_SUBST(OSPF6D)
 AC_SUBST(BABELD)
+AC_SUBST(LDPD)
 AC_SUBST(WATCHQUAGGA)
 AC_SUBST(ISISD)
 AC_SUBST(SOLARIS)
@@ -1566,6 +1601,7 @@ AC_DEFINE_UNQUOTED(PATH_OSPFD_PID, "$quagga_statedir/ospfd.pid",ospfd PID)
 AC_DEFINE_UNQUOTED(PATH_OSPF6D_PID, "$quagga_statedir/ospf6d.pid",ospf6d PID)
 AC_DEFINE_UNQUOTED(PATH_BABELD_PID, "$quagga_statedir/babeld.pid",babeld PID)
 AC_DEFINE_UNQUOTED(PATH_ISISD_PID, "$quagga_statedir/isisd.pid",isisd PID)
+AC_DEFINE_UNQUOTED(PATH_LDPD_PID, "$quagga_statedir/ldpd.pid",ldpd PID)
 AC_DEFINE_UNQUOTED(PATH_WATCHQUAGGA_PID, "$quagga_statedir/watchquagga.pid",watchquagga PID)
 AC_DEFINE_UNQUOTED(ZEBRA_SERV_PATH, "$quagga_statedir/zserv.api",zebra api socket)
 AC_DEFINE_UNQUOTED(ZEBRA_VTYSH_PATH, "$quagga_statedir/zebra.vty",zebra vty socket)
@@ -1576,6 +1612,7 @@ AC_DEFINE_UNQUOTED(OSPF_VTYSH_PATH, "$quagga_statedir/ospfd.vty",ospfd vty socke
 AC_DEFINE_UNQUOTED(OSPF6_VTYSH_PATH, "$quagga_statedir/ospf6d.vty",ospf6d vty socket)
 AC_DEFINE_UNQUOTED(BABEL_VTYSH_PATH, "$quagga_statedir/babeld.vty",babeld vty socket)
 AC_DEFINE_UNQUOTED(ISIS_VTYSH_PATH, "$quagga_statedir/isisd.vty",isisd vty socket)
+AC_DEFINE_UNQUOTED(LDP_VTYSH_PATH, "$quagga_statedir/ldpd.vty",ldpd vty socket)
 AC_DEFINE_UNQUOTED(DAEMON_VTY_DIR, "$quagga_statedir",daemon vty directory)
 
 dnl -------------------------------
@@ -1601,7 +1638,7 @@ AC_CONFIG_FILES([Makefile lib/Makefile zebra/Makefile ripd/Makefile
 	  ripngd/Makefile bgpd/Makefile ospfd/Makefile watchquagga/Makefile
 	  ospf6d/Makefile isisd/Makefile babeld/Makefile vtysh/Makefile
           doc/Makefile ospfclient/Makefile tests/Makefile m4/Makefile
-          redhat/Makefile
+          redhat/Makefile ldpd/Makefile
 	  pkgsrc/Makefile
 	  redhat/quagga.spec 
 	  lib/version.h

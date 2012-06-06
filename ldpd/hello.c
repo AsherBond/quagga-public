@@ -1,5 +1,3 @@
-/*	$OpenBSD: hello.c,v 1.11 2011/01/10 12:28:25 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  *
@@ -16,30 +14,17 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/if_dl.h>
-
-#include <errno.h>
-#include <event.h>
-#include <stdlib.h>
-#include <string.h>
+#include <zebra.h>
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
+#include "ldp_debug.h"
 
 int	tlv_decode_hello_prms(char *, u_int16_t, u_int16_t *, u_int16_t *);
 int	tlv_decode_opt_hello_prms(char *, u_int16_t, struct in_addr *,
 	    u_int32_t *);
-int	gen_hello_prms_tlv(struct iface *, struct ibuf *, u_int16_t);
+int	gen_hello_prms_tlv(struct iface *, struct ibuf *);
+int	gen_opt_hello_prms_tlv(struct iface *, struct ibuf *);
 
 int
 send_hello(struct iface *iface)
@@ -50,7 +35,9 @@ send_hello(struct iface *iface)
 
 	dst.sin_port = htons(LDP_PORT);
 	dst.sin_family = AF_INET;
+#ifdef HAVE_STRUCT_SOCKADDR_IN_SIN_LEN
 	dst.sin_len = sizeof(struct sockaddr_in);
+#endif /* HAVE_STRUCT_SOCKADDR_IN_SIN_LEN */
 	inet_aton(AllRouters, &dst.sin_addr);
 
 	if (iface->passive)
@@ -59,18 +46,20 @@ send_hello(struct iface *iface)
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
 		fatal("send_hello");
 
+	log_pkt_send("send_hello: %s", iface->name);
+
 	size = LDP_HDR_SIZE + sizeof(struct ldp_msg) +
-	    sizeof(struct hello_prms_tlv);
+	    sizeof(struct hello_prms_tlv) +
+	    sizeof(struct opt_hello_prms_tlv);
 
 	gen_ldp_hdr(buf, iface, size);
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_HELLO, size);
+	gen_msg_tlv(NULL, buf, MSG_TYPE_HELLO, size);
 
-	size -= sizeof(struct ldp_msg);
-
-	gen_hello_prms_tlv(iface, buf, size);
+	gen_hello_prms_tlv(iface, buf);
+	gen_opt_hello_prms_tlv(iface, buf);
 
 	send_packet(iface, buf->buf, buf->wpos, &dst);
 	ibuf_free(buf);
@@ -85,6 +74,7 @@ recv_hello(struct iface *iface, struct in_addr src, char *buf, u_int16_t len)
 	struct ldp_hdr		 ldp;
 	struct nbr		*nbr = NULL;
 	struct in_addr		 address;
+	struct in_addr		 transport_addr;
 	u_int32_t		 conf_number;
 	u_int16_t		 holdtime, flags;
 	int			 r;
@@ -100,7 +90,7 @@ recv_hello(struct iface *iface, struct in_addr src, char *buf, u_int16_t len)
 	r = tlv_decode_hello_prms(buf, len, &holdtime, &flags);
 	if (r == -1) {
 		address.s_addr = ldp.lsr_id;
-		log_debug("recv_hello: neighbor %s: failed to decode params",
+		zlog_warn("recv_hello: neighbor %s: failed to decode params",
 		    inet_ntoa(address));
 		return;
 	}
@@ -111,67 +101,88 @@ recv_hello(struct iface *iface, struct in_addr src, char *buf, u_int16_t len)
 	r = tlv_decode_opt_hello_prms(buf, len, &address, &conf_number);
 	if (r == -1) {
 		address.s_addr = ldp.lsr_id;
-		log_debug("recv_hello: neighbor %s: failed to decode "
+		zlog_warn("recv_hello: neighbor %s: failed to decode "
 		    "optional params", inet_ntoa(address));
 		return;
 	}
 	if (r != len) {
 		address.s_addr = ldp.lsr_id;
-		log_debug("recv_hello: neighbor %s: unexpected data in message",
+		zlog_warn("recv_hello: neighbor %s: unexpected data in message",
 		    inet_ntoa(address));
 		return;
 	}
 
-	nbr = nbr_find_ldpid(ldp.lsr_id, ldp.lspace_id);
+	nbr = nbr_find_lsrid(ldp.lsr_id);
 	if (!nbr) {
-		nbr = nbr_new(ldp.lsr_id, ldp.lspace_id, iface);
-
 		/* set neighbor parameters */
 		if (address.s_addr == INADDR_ANY)
-			nbr->addr.s_addr = src.s_addr;
+			transport_addr.s_addr = src.s_addr;
 		else
-			nbr->addr.s_addr = address.s_addr;
+			transport_addr.s_addr = address.s_addr;
 
+		nbr = nbr_new(ldp.lsr_id, transport_addr, iface);
+
+		nbr->hello_addr.s_addr = src.s_addr;
 		nbr->hello_type = flags;
 
 		if (holdtime == 0) {
 			/* XXX: lacks support for targeted hellos */
-			if (iface->holdtime < LINK_DFLT_HOLDTIME)
-				nbr->holdtime = iface->holdtime;
+			if (ldpd_conf->holdtime < LINK_DFLT_HOLDTIME)
+				nbr->holdtime = ldpd_conf->holdtime;
 			else
 				nbr->holdtime = LINK_DFLT_HOLDTIME;
 		} else if (holdtime == INFINITE_HOLDTIME) {
 			/* No timeout for this neighbor */
-			nbr->holdtime = iface->holdtime;
+			nbr->holdtime = ldpd_conf->holdtime;
 		} else {
-			if (iface->holdtime < holdtime)
-				nbr->holdtime = iface->holdtime;
+			if (ldpd_conf->holdtime < holdtime)
+				nbr->holdtime = ldpd_conf->holdtime;
 			else
 				nbr->holdtime = holdtime;
 		}
 	}
 
+	log_pkt_recv("recv_hello: LSR ID %s", inet_ntoa(nbr->id));
+
 	nbr_fsm(nbr, NBR_EVT_HELLO_RCVD);
 
-	if (ntohl(nbr->addr.s_addr) < ntohl(nbr->iface->addr.s_addr) &&
+	if (htonl(nbr->remote_addr.s_addr) < htonl(nbr->local_addr.s_addr) &&
 	    nbr->state == NBR_STA_PRESENT && !nbr_pending_idtimer(nbr))
 		nbr_act_session_establish(nbr, 1);
 }
 
 int
-gen_hello_prms_tlv(struct iface *iface, struct ibuf *buf, u_int16_t size)
+gen_hello_prms_tlv(struct iface *iface, struct ibuf *buf)
 {
 	struct hello_prms_tlv	parms;
 
-	/* We want just the size of the value */
-	size -= TLV_HDR_LEN;
-
 	bzero(&parms, sizeof(parms));
 	parms.type = htons(TLV_TYPE_COMMONHELLO);
-	parms.length = htons(size);
-	/* XXX */
-	parms.holdtime = htons(iface->holdtime);
+	parms.length = htons(sizeof(parms.holdtime) + sizeof(parms.flags));
+	parms.holdtime = htons(ldpd_conf->holdtime);
 	parms.flags = 0;
+
+	return (ibuf_add(buf, &parms, sizeof(parms)));
+}
+
+int
+gen_opt_hello_prms_tlv(struct iface *iface, struct ibuf *buf)
+{
+	struct opt_hello_prms_tlv	 parms;
+	struct in_addr			*addr;
+
+	bzero(&parms, sizeof(parms));
+	parms.type = htons(TLV_TYPE_IPV4TRANSADDR);
+	parms.length = htons(sizeof(parms.value));
+
+	if (iface->if_info->transport_addr == TRANSPORT_ADDRESS_INTERFACE)
+		addr = &iface->addr;
+	else if (iface->if_info->transport_addr == TRANSPORT_ADDRESS_ROUTER_ID)
+		addr = &ldpd_conf->rtr_id;
+	else if (iface->if_info->transport_addr == TRANSPORT_ADDRESS_STATIC_IP)
+		addr = &iface->if_info->transport_addr_static_ip;
+
+	parms.value = addr->s_addr;
 
 	return (ibuf_add(buf, &parms, sizeof(parms)));
 }

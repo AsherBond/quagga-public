@@ -1,5 +1,3 @@
-/*	$OpenBSD: ldpd.h,v 1.28 2011/01/10 12:28:25 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  * Copyright (c) 2004 Esben Norby <norby@openbsd.org>
@@ -22,69 +20,61 @@
 #define _LDPD_H_
 
 #include <sys/queue.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/tree.h>
-#include <md5.h>
-#include <net/if.h>
-#include <netinet/in.h>
-#include <event.h>
-
 #include <imsg.h>
+#include "tree.h"
+#include "if.h"
+#include "prefix.h"
 #include "ldp.h"
 
-#define CONF_FILE		"/etc/ldpd.conf"
+/* default configuration file name */
+#define LDPD_DEFAULT_CONFIG     "ldpd.conf"
 #define	LDPD_SOCKET		"/var/run/ldpd.sock"
-#define LDPD_USER		"_ldpd"
 
-#define NBR_HASHSIZE		128
+/* LDP VTY port number */
+#define LDP_VTY_PORT            2610
 
 #define NBR_IDSELF		1
 #define NBR_CNTSTART		(NBR_IDSELF + 1)
 
-#define	RT_BUF_SIZE		16384
-#define	MAX_RTSOCK_BUF		128 * 1024
 #define	LDP_BACKLOG		128
 
-#define	LDPD_FLAG_NO_FIB_UPDATE	0x0001
+#define LDP_IF_TIMER_ON(T,F,V)                                                \
+    do {                                                                      \
+      if (!(T))                                                               \
+	(T) = thread_add_timer (master, (F), iface, (V));                     \
+    } while (0)
 
-#define	F_LDPD_INSERTED		0x0001
-#define	F_CONNECTED		0x0002
-#define	F_STATIC		0x0004
-#define	F_DYNAMIC		0x0008
-#define	F_REJECT		0x0010
-#define	F_BLACKHOLE		0x0020
-#define	F_REDISTRIBUTED		0x0040
+#define LDP_NBR_TIMER_ON(T,F,V)                                               \
+    do {                                                                      \
+      if (!(T))                                                               \
+	(T) = thread_add_timer (master, (F), nbr, (V));                       \
+    } while (0)
+
+#define LDP_TIMER_OFF(X)                                                      \
+    do {                                                                      \
+      if (X)                                                                  \
+        {                                                                     \
+          thread_cancel (X);                                                  \
+          (X) = NULL;                                                         \
+        }                                                                     \
+    } while (0)
 
 struct evbuf {
-	struct msgbuf		wbuf;
-	struct event		ev;
-};
-
-struct imsgev {
-	struct imsgbuf		 ibuf;
-	void			(*handler)(int, short, void *);
-	struct event		 ev;
-	void			*data;
-	short			 events;
+	struct msgbuf		 wbuf;
+	struct thread		*t_write;
+	int			(*handler)(struct thread *);
+	void			*arg;
 };
 
 enum imsg_type {
 	IMSG_NONE,
-	IMSG_CTL_RELOAD,
-	IMSG_CTL_SHOW_INTERFACE,
-	IMSG_CTL_SHOW_NBR,
-	IMSG_CTL_SHOW_LIB,
-	IMSG_CTL_FIB_COUPLE,
-	IMSG_CTL_FIB_DECOUPLE,
-	IMSG_CTL_KROUTE,
-	IMSG_CTL_KROUTE_ADDR,
-	IMSG_CTL_IFINFO,
-	IMSG_CTL_END,
-	IMSG_CTL_LOG_VERBOSE,
-	IMSG_KLABEL_CHANGE,
-	IMSG_KLABEL_DELETE,
-	IMSG_IFINFO,
+	IMSG_ZEBRA_NETWORK_ADD,
+	IMSG_ZEBRA_NETWORK_DEL,
+	IMSG_ZEBRA_CHANGE_INPUT_LABEL,
+	IMSG_ZEBRA_ADD_LSP,
+	IMSG_ZEBRA_DELETE_LSP,
+	IMSG_IF_ENABLE,
+	IMSG_IF_DISABLE,
 	IMSG_LABEL_MAPPING,
 	IMSG_LABEL_MAPPING_FULL,
 	IMSG_LABEL_REQUEST,
@@ -95,6 +85,8 @@ enum imsg_type {
 	IMSG_REQUEST_ADD_END,
 	IMSG_MAPPING_ADD,
 	IMSG_MAPPING_ADD_END,
+	IMSG_WITHDRAWN_ADD,
+	IMSG_WITHDRAWN_ADD_END,
 	IMSG_RELEASE_ADD,
 	IMSG_RELEASE_ADD_END,
 	IMSG_ADDRESS_ADD,
@@ -103,11 +95,6 @@ enum imsg_type {
 	IMSG_NEIGHBOR_UP,
 	IMSG_NEIGHBOR_DOWN,
 	IMSG_NEIGHBOR_CHANGE,
-	IMSG_NETWORK_ADD,
-	IMSG_NETWORK_DEL,
-	IMSG_RECONF_CONF,
-	IMSG_RECONF_IFACE,
-	IMSG_RECONF_END
 };
 
 /* interface states */
@@ -129,12 +116,6 @@ enum iface_action {
 	IF_ACT_NOTHING,
 	IF_ACT_STRT,
 	IF_ACT_RST
-};
-
-/* interface types */
-enum iface_type {
-	IF_TYPE_POINTOPOINT,
-	IF_TYPE_BROADCAST
 };
 
 /* neighbor states */
@@ -168,7 +149,6 @@ enum nbr_action {
 	NBR_ACT_RST_ITIMER,
 	NBR_ACT_RST_KTIMEOUT,
 	NBR_ACT_STRT_KTIMER,
-	NBR_ACT_RST_KTIMER,
 	NBR_ACT_SESSION_EST,
 	NBR_ACT_INIT_SEND,
 	NBR_ACT_KEEPALIVE_SEND,
@@ -195,47 +175,52 @@ struct notify_msg {
 	u_int32_t	type;
 };
 
+enum transport_addr_type {
+	TRANSPORT_ADDRESS_ROUTER_ID = 0,
+	TRANSPORT_ADDRESS_INTERFACE,
+	TRANSPORT_ADDRESS_STATIC_IP
+};
+
+struct iface;
+
+struct ldp_if_info {
+	struct iface		*iface;
+	int			 ldp_enabled;
+	enum transport_addr_type transport_addr;
+	struct in_addr		 transport_addr_static_ip;
+};
+
 struct iface {
 	LIST_ENTRY(iface)	 entry;
-	struct event		 hello_timer;
+	struct thread		*hello_timer;
 
-	LIST_HEAD(, lde_nbr)	 lde_nbr_list;
+	LIST_HEAD(, nbr)	 nbr_list;
 
+	struct ldp_if_info	*if_info;
 	char			 name[IF_NAMESIZE];
 	struct in_addr		 addr;
-	struct in_addr		 dst;
-	struct in_addr		 mask;
 
-	u_int16_t		 lspace_id;
-
-	u_int64_t		 baudrate;
 	time_t			 uptime;
 	unsigned int		 ifindex;
 	int			 discovery_fd;
 	int			 session_fd;
 	int			 state;
 	int			 mtu;
-	u_int16_t		 holdtime;
-	u_int16_t		 keepalive;
-	u_int16_t		 hello_interval;
 	u_int16_t		 flags;
-	enum iface_type		 type;
-	u_int8_t		 media_type;
 	u_int8_t		 linkstate;
-	u_int8_t		 priority;
 	u_int8_t		 passive;
 };
 
 /* ldp_conf */
-enum {
-	PROC_MAIN,
-	PROC_LDP_ENGINE,
-	PROC_LDE_ENGINE
-} ldpd_process;
-
 enum blockmodes {
 	BM_NORMAL,
 	BM_NONBLOCK
+};
+
+struct ldp_passwd {
+	LIST_ENTRY(ldp_passwd)	 entry;
+	struct in_addr		 neighbor_addr;
+	char 			*passwd;
 };
 
 #define	MODE_DIST_INDEPENDENT	0x01
@@ -246,19 +231,24 @@ enum blockmodes {
 #define	MODE_ADV_UNSOLICITED	0x20
 
 struct ldpd_conf {
-	struct event		disc_ev, sess_ev;
+	int			ldp_enabled;
+	struct thread		*t_disc_ev, *t_sess_ev;
 	struct in_addr		rtr_id;
 	LIST_HEAD(, iface)	iface_list;
 
 	u_int32_t		opts;
-#define LDPD_OPT_VERBOSE	0x00000001
-#define LDPD_OPT_VERBOSE2	0x00000002
-#define LDPD_OPT_NOACTION	0x00000004
+#define LDPD_OPT_EXPLICIT_NULL	0x00000001
 	time_t			uptime;
 	int			ldp_discovery_socket;
 	int			ldp_session_socket;
 	int			flags;
 	u_int8_t		mode;
+
+	u_int16_t		keepalive;
+	u_int16_t		holdtime;
+	u_int16_t		hello_interval;
+
+	LIST_HEAD(, ldp_passwd)	passwd_list;
 };
 
 /* kroute */
@@ -267,140 +257,36 @@ struct kroute {
 	struct in_addr	nexthop;
 	u_int32_t	local_label;
 	u_int32_t	remote_label;
-	u_int16_t	flags;
 	u_short		ifindex;
 	u_int8_t	prefixlen;
-	u_int8_t	priority;
+	u_char		connected;
 };
-
-struct kif_addr {
-	TAILQ_ENTRY(kif_addr)	 entry;
-	struct in_addr		 addr;
-	struct in_addr		 mask;
-	struct in_addr		 dstbrd;
-};
-
-struct kif {
-	char			 ifname[IF_NAMESIZE];
-	u_int64_t		 baudrate;
-	int			 flags;
-	int			 mtu;
-	u_short			 ifindex;
-	u_int8_t		 media_type;
-	u_int8_t		 link_state;
-};
-
-/* control data structures */
-struct ctl_iface {
-	char			 name[IF_NAMESIZE];
-	struct in_addr		 addr;
-	struct in_addr		 mask;
-	struct in_addr		 lspace;
-	struct in_addr		 rtr_id;
-	struct in_addr		 dr_id;
-	struct in_addr		 dr_addr;
-	struct in_addr		 bdr_id;
-	struct in_addr		 bdr_addr;
-	time_t			 hello_timer;
-	time_t			 uptime;
-	u_int64_t		 baudrate;
-	unsigned int		 ifindex;
-	int			 state;
-	int			 mtu;
-	int			 nbr_cnt;
-	int			 adj_cnt;
-	u_int16_t		 flags;
-	u_int16_t		 holdtime;
-	u_int16_t		 hello_interval;
-	enum iface_type		 type;
-	u_int8_t		 linkstate;
-	u_int8_t		 mediatype;
-	u_int8_t		 priority;
-	u_int8_t		 passive;
-};
-
-struct ctl_nbr {
-	char			 name[IF_NAMESIZE];
-	struct in_addr		 id;
-	struct in_addr		 addr;
-	struct in_addr		 dr;
-	struct in_addr		 bdr;
-	struct in_addr		 lspace;
-	time_t			 dead_timer;
-	time_t			 uptime;
-	u_int32_t		 db_sum_lst_cnt;
-	u_int32_t		 ls_req_lst_cnt;
-	u_int32_t		 ls_retrans_lst_cnt;
-	u_int32_t		 state_chng_cnt;
-	int			 nbr_state;
-	int			 iface_state;
-	u_int8_t		 priority;
-	u_int8_t		 options;
-};
-
-struct ctl_rt {
-	struct in_addr		 prefix;
-	struct in_addr		 nexthop;
-	struct in_addr		 lspace;
-	struct in_addr		 adv_rtr;
-	time_t			 uptime;
-	u_int32_t		 local_label;
-	u_int32_t		 remote_label;
-	u_int8_t		 flags;
-	u_int8_t		 prefixlen;
-	u_int8_t		 connected;
-	u_int8_t		 in_use;
-};
-
-/* parse.y */
-struct ldpd_conf	*parse_config(char *, int);
-int			 cmdline_symset(char *);
-
-/* control.c */
-void	session_socket_blockmode(int, enum blockmodes);
-
-/* in_cksum.c */
-u_int16_t	 in_cksum(void *, size_t);
-
-/* iso_cksum.c */
-u_int16_t	 iso_cksum(void *, u_int16_t, u_int16_t);
-
-/* kroute.c */
-int		 kif_init(void);
-int		 kr_init(int);
-int		 kr_change(struct kroute *);
-int		 kr_delete(struct kroute *);
-void		 kr_shutdown(void);
-void		 kr_fib_couple(void);
-void		 kr_fib_decouple(void);
-void		 kr_dispatch_msg(int, short, void *);
-void		 kr_show_route(struct imsg *);
-void		 kr_ifinfo(char *, pid_t);
-struct kif	*kif_findname(char *, struct in_addr, struct kif_addr **);
-void		 kr_reload(void);
-
-u_int8_t	mask2prefixlen(in_addr_t);
-in_addr_t	prefixlen2mask(u_int8_t);
-
-/* log.h */
-const char	*nbr_state_name(int);
-const char	*if_state_name(int);
-const char	*if_type_name(enum iface_type);
-const char	*notification_name(u_int32_t);
 
 /* ldpd.c */
-void	main_imsg_compose_ldpe(int, pid_t, void *, u_int16_t);
-void	main_imsg_compose_lde(int, pid_t, void *, u_int16_t);
-void	merge_config(struct ldpd_conf *, struct ldpd_conf *);
-int	imsg_compose_event(struct imsgev *, u_int16_t, u_int32_t, pid_t,
-	    int, void *, u_int16_t);
-void	imsg_event_add(struct imsgev *);
+void	ldpd_process(int type, void *data, u_int16_t datalen);
 void	evbuf_enqueue(struct evbuf *, struct ibuf *);
 void	evbuf_event_add(struct evbuf *);
-void	evbuf_init(struct evbuf *, int, void (*)(int, short, void *), void *);
+void	evbuf_init(struct evbuf *, int, int (*)(struct thread *), void *);
 void	evbuf_clear(struct evbuf *);
 
-/* printconf.c */
-void	print_config(struct ldpd_conf *);
+/* ldp_zebra.c */
+int	ldp_if_enabled(struct iface *);
+int	ldp_zebra_send_change_input_label(struct kroute *);
+int	ldp_zebra_send_lsp(int, struct kroute *);
+void	ldp_zebra_init(void);
+
+/* ldp_vty.c */
+#define        TF_BUFS 8
+#define        TF_LEN  9
+void	ldp_vty_init(void);
+
+/* socket helper functions */
+void session_socket_blockmode(int fd, enum blockmodes bm);
+
+/* global configuration status */
+extern struct ldpd_conf	*ldpd_conf;
+
+/* LDPd thread master */
+extern struct thread_master *master;
 
 #endif	/* _LDPD_H_ */

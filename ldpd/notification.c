@@ -1,5 +1,3 @@
-/*	$OpenBSD: notification.c,v 1.9 2011/01/20 23:12:33 jasper Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  *
@@ -16,26 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/if_dl.h>
-#include <unistd.h>
-
-#include <errno.h>
-#include <event.h>
-#include <stdlib.h>
-#include <string.h>
+#include <zebra.h>
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
+#include "ldp_debug.h"
 
 int	gen_status_tlv(struct ibuf *, u_int32_t, u_int32_t, u_int32_t);
 
@@ -47,6 +30,8 @@ send_notification_nbr(struct nbr *nbr, u_int32_t status, u_int32_t msgid,
 
 	if (nbr->iface->passive)
 		return;
+
+	log_pkt_send("send_notification_nbr: neighbor ID %s", inet_ntoa(nbr->id));
 
 	buf = send_notification(status, nbr->iface, msgid, type);
 	evbuf_enqueue(&nbr->wbuf, buf);
@@ -68,7 +53,7 @@ send_notification(u_int32_t status, struct iface *iface, u_int32_t msgid,
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_NOTIFICATION, size);
+	gen_msg_tlv(NULL, buf, MSG_TYPE_NOTIFICATION, size);
 
 	size -= sizeof(struct ldp_msg);
 
@@ -83,7 +68,7 @@ recv_notification(struct nbr *nbr, char *buf, u_int16_t len)
 	struct ldp_msg		not;
 	struct status_tlv	st;
 
-	log_debug("recv_notification: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_recv("recv_notification: neighbor ID %s", inet_ntoa(nbr->id));
 
 	bcopy(buf, &not, sizeof(not));
 
@@ -105,11 +90,11 @@ recv_notification(struct nbr *nbr, char *buf, u_int16_t len)
 	/* TODO optional parameters: ext status, returned PDU and msg */
 
 	if (st.status_code & htonl(STATUS_FATAL))
-		log_warnx("received notification from neighbor %s: %s",
+		zlog_warn("received notification from neighbor %s: %s",
 		    inet_ntoa(nbr->id),
 		    notification_name(ntohl(st.status_code)));
 	else
-		log_debug("received non-fatal notification from neighbor "
+		zlog_debug("received non-fatal notification from neighbor "
 		    "%s: %s", inet_ntoa(nbr->id),
 		    notification_name(ntohl(st.status_code)));
 

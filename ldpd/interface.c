@@ -1,5 +1,3 @@
-/*	$OpenBSD: interface.c,v 1.7 2011/01/10 12:28:25 claudio Exp $ */
-
 /*
  * Copyright (c) 2005 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2004, 2005, 2008 Esben Norby <norby@openbsd.org>
@@ -17,32 +15,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/ioctl.h>
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <net/if.h>
-#include <net/if_types.h>
-#include <fcntl.h>
-#include <ctype.h>
-#include <err.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <event.h>
+#include <zebra.h>
+
+#include "memory.h"
+#include "sockopt.h"
+#include "thread.h"
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
+#include "ldp_debug.h"
 
-void		 if_hello_timer(int, short, void *);
+static int	 if_hello_timer(struct thread *);
 void		 if_start_hello_timer(struct iface *);
 void		 if_stop_hello_timer(struct iface *);
-struct nbr	*if_elect(struct nbr *, struct nbr *);
 
 struct {
 	int			state;
@@ -87,7 +72,7 @@ if_fsm(struct iface *iface, enum iface_event event)
 
 	if (iface_fsm[i].state == -1) {
 		/* event outside of the defined fsm, ignore it. */
-		log_debug("if_fsm: interface %s, "
+		zlog_warn("if_fsm: interface %s, "
 		    "event %s not expected in state %s", iface->name,
 		    if_event_names[event], if_state_name(old_state));
 		return (0);
@@ -106,7 +91,7 @@ if_fsm(struct iface *iface, enum iface_event event)
 	}
 
 	if (ret) {
-		log_debug("if_fsm: error changing state for interface %s, "
+		zlog_warn("if_fsm: error changing state for interface %s, "
 		    "event %s, state %s", iface->name, if_event_names[event],
 		    if_state_name(old_state));
 		return (-1);
@@ -115,7 +100,7 @@ if_fsm(struct iface *iface, enum iface_event event)
 	if (new_state != 0)
 		iface->state = new_state;
 
-	log_debug("if_fsm: event %s resulted in action %s and changing "
+	log_event("if_fsm: event %s resulted in action %s and changing "
 	    "state for interface %s from %s to %s",
 	    if_event_names[event], if_action_names[iface_fsm[i].action],
 	    iface->name, if_state_name(old_state), if_state_name(iface->state));
@@ -124,44 +109,26 @@ if_fsm(struct iface *iface, enum iface_event event)
 }
 
 struct iface *
-if_new(struct kif *kif, struct kif_addr *ka)
+if_new(struct interface *ifp)
 {
 	struct iface		*iface;
 
-	if ((iface = calloc(1, sizeof(*iface))) == NULL)
-		err(1, "if_new: calloc");
-
+	iface = XCALLOC(MTYPE_LDP, sizeof(*iface));
 	iface->state = IF_STA_DOWN;
 
-	LIST_INIT(&iface->lde_nbr_list);
+	LIST_INIT(&iface->nbr_list);
 
-	strlcpy(iface->name, kif->ifname, sizeof(iface->name));
+	strlcpy(iface->name, ifp->name, sizeof(iface->name));
 
-	/* get type */
-	if (kif->flags & IFF_POINTOPOINT)
-		iface->type = IF_TYPE_POINTOPOINT;
-	if (kif->flags & IFF_BROADCAST &&
-	    kif->flags & IFF_MULTICAST)
-		iface->type = IF_TYPE_BROADCAST;
-	if (kif->flags & IFF_LOOPBACK) {
-		iface->type = IF_TYPE_POINTOPOINT;
+	/* checks if the interface is loopback */
+	if (ifp->flags & IFF_LOOPBACK)
 		iface->state = IF_STA_LOOPBACK;
-	}
 
 	/* get mtu, index and flags */
-	iface->mtu = kif->mtu;
-	iface->ifindex = kif->ifindex;
-	iface->flags = kif->flags;
-	iface->linkstate = kif->link_state;
-	iface->media_type = kif->media_type;
-	iface->baudrate = kif->baudrate;
-
-	/* set address, mask and p2p addr */
-	iface->addr = ka->addr;
-	iface->mask = ka->mask;
-	if (kif->flags & IFF_POINTOPOINT) {
-		iface->dst = ka->dstbrd;
-	}
+	iface->mtu = ifp->mtu;
+	iface->ifindex = ifp->ifindex;
+	iface->flags = ifp->flags;
+	iface->linkstate = 0;
 
 	return (iface);
 }
@@ -169,56 +136,47 @@ if_new(struct kif *kif, struct kif_addr *ka)
 void
 if_del(struct iface *iface)
 {
-	log_debug("if_del: interface %s", iface->name);
+	log_event("if_del: interface %s", iface->name);
 
-	if (evtimer_pending(&iface->hello_timer, NULL))
-		evtimer_del(&iface->hello_timer);
+	LDP_TIMER_OFF(iface->hello_timer);
 
-	free(iface);
+	XFREE(MTYPE_LDP, iface);
 }
 
 void
-if_init(struct ldpd_conf *xconf, struct iface *iface)
+if_init_ldp(struct iface *iface)
 {
-	/* set event handlers for interface */
-	evtimer_set(&iface->hello_timer, if_hello_timer, iface);
-
-	iface->discovery_fd = xconf->ldp_discovery_socket;
+	iface->discovery_fd = ldpd_conf->ldp_discovery_socket;
 }
 
 /* timers */
-/* ARGSUSED */
-void
-if_hello_timer(int fd, short event, void *arg)
+static int
+if_hello_timer(struct thread *thread)
 {
-	struct iface *iface = arg;
-	struct timeval tv;
+	struct iface *iface = THREAD_ARG(thread);
 
 	send_hello(iface);
 
 	/* reschedule hello_timer */
-	timerclear(&tv);
-	tv.tv_sec = iface->hello_interval;
-	if (evtimer_add(&iface->hello_timer, &tv) == -1)
-		fatal("if_hello_timer");
+	iface->hello_timer = NULL;
+	LDP_IF_TIMER_ON(iface->hello_timer, if_hello_timer,
+			ldpd_conf->hello_interval);
+
+	return 0;
 }
 
 void
 if_start_hello_timer(struct iface *iface)
 {
-	struct timeval tv;
-
-	timerclear(&tv);
-	tv.tv_sec = iface->hello_interval;
-	if (evtimer_add(&iface->hello_timer, &tv) == -1)
-		fatal("if_start_hello_timer");
+	iface->hello_timer = NULL;
+	LDP_IF_TIMER_ON(iface->hello_timer, if_hello_timer,
+			ldpd_conf->hello_interval);
 }
 
 void
 if_stop_hello_timer(struct iface *iface)
 {
-	if (evtimer_del(&iface->hello_timer) == -1)
-		fatal("if_stop_hello_timer");
+	LDP_TIMER_OFF(iface->hello_timer);
 }
 
 /* actions */
@@ -228,20 +186,10 @@ if_act_start(struct iface *iface)
 	struct in_addr		 addr;
 	struct timeval		 now;
 
-	if (!((iface->flags & IFF_UP) &&
-	    (LINK_STATE_IS_UP(iface->linkstate) ||
-	    (iface->linkstate == LINK_STATE_UNKNOWN &&
-	    iface->media_type != IFT_CARP)))) {
-		log_debug("if_act_start: interface %s link down",
+	if (!(iface->flags & IFF_UP && iface->flags & IFF_RUNNING)) {
+		log_event("if_act_start: interface %s link down",
 		    iface->name);
 		return (0);
-	}
-
-	if (iface->media_type == IFT_CARP && iface->passive == 0) {
-		/* force passive mode on carp interfaces */
-		log_warnx("if_act_start: forcing interface %s to passive",
-		    iface->name);
-		iface->passive = 1;
 	}
 
 	gettimeofday(&now, NULL);
@@ -264,48 +212,13 @@ if_act_reset(struct iface *iface)
 
 	inet_aton(AllRouters, &addr);
 	if (if_leave_group(iface, &addr)) {
-		log_warnx("if_act_reset: error leaving group %s, "
+		zlog_warn("if_act_reset: error leaving group %s, "
 		    "interface %s", inet_ntoa(addr), iface->name);
 	}
+
+	if_stop_hello_timer (iface);
+
 	return (0);
-}
-
-struct ctl_iface *
-if_to_ctl(struct iface *iface)
-{
-	static struct ctl_iface	 ictl;
-	struct timeval		 tv, now, res;
-
-	memcpy(ictl.name, iface->name, sizeof(ictl.name));
-	memcpy(&ictl.addr, &iface->addr, sizeof(ictl.addr));
-	memcpy(&ictl.mask, &iface->mask, sizeof(ictl.mask));
-	ictl.rtr_id.s_addr = ldpe_router_id();
-	ictl.ifindex = iface->ifindex;
-	ictl.state = iface->state;
-	ictl.mtu = iface->mtu;
-	ictl.baudrate = iface->baudrate;
-	ictl.holdtime = iface->holdtime;
-	ictl.hello_interval = iface->hello_interval;
-	ictl.flags = iface->flags;
-	ictl.type = iface->type;
-	ictl.linkstate = iface->linkstate;
-	ictl.mediatype = iface->media_type;
-	ictl.priority = iface->priority;
-	ictl.passive = iface->passive;
-
-	gettimeofday(&now, NULL);
-	if (evtimer_pending(&iface->hello_timer, &tv)) {
-		timersub(&tv, &now, &res);
-		ictl.hello_timer = res.tv_sec;
-	} else
-		ictl.hello_timer = -1;
-
-	if (iface->state != IF_STA_DOWN) {
-		ictl.uptime = now.tv_sec - iface->uptime;
-	} else
-		ictl.uptime = 0;
-
-	return (&ictl);
 }
 
 /* misc */
@@ -314,7 +227,7 @@ if_set_mcast_ttl(int fd, u_int8_t ttl)
 {
 	if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL,
 	    (char *)&ttl, sizeof(ttl)) < 0) {
-		log_warn("if_set_mcast_ttl: error setting "
+		zlog_warn("if_set_mcast_ttl: error setting "
 		    "IP_MULTICAST_TTL to %d", ttl);
 		return (-1);
 	}
@@ -326,7 +239,7 @@ int
 if_set_tos(int fd, int tos)
 {
 	if (setsockopt(fd, IPPROTO_IP, IP_TOS, (int *)&tos, sizeof(tos)) < 0) {
-		log_warn("if_set_tos: error setting IP_TOS to 0x%x", tos);
+		zlog_warn("if_set_tos: error setting IP_TOS to 0x%x", tos);
 		return (-1);
 	}
 
@@ -336,9 +249,9 @@ if_set_tos(int fd, int tos)
 int
 if_set_recvif(int fd, int enable)
 {
-	if (setsockopt(fd, IPPROTO_IP, IP_RECVIF, &enable,
+	if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &enable,
 	    sizeof(enable)) < 0) {
-		log_warn("if_set_recvif: error setting IP_RECVIF");
+		zlog_warn("if_set_recvif: error setting IP_PKTINFO");
 		return (-1);
 	}
 	return (0);
@@ -360,102 +273,53 @@ if_set_reuse(int fd, int enable)
 {
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable,
 	    sizeof(int)) < 0) {
-		log_warn("if_set_reuse: error setting SO_REUSEADDR");
+		zlog_warn("if_set_reuse: error setting SO_REUSEADDR");
 		return (-1);
 	}
 
 	return (0);
 }
 
-/*
- * only one JOIN or DROP per interface and address is allowed so we need
- * to keep track of what is added and removed.
- */
-struct if_group_count {
-	LIST_ENTRY(if_group_count)	entry;
-	struct in_addr			addr;
-	unsigned int			ifindex;
-	int				count;
-};
-
-LIST_HEAD(,if_group_count) ifglist = LIST_HEAD_INITIALIZER(ifglist);
-
 int
 if_join_group(struct iface *iface, struct in_addr *addr)
 {
-	struct ip_mreq		 mreq;
-	struct if_group_count	*ifg;
+	int ret;
 
-	LIST_FOREACH(ifg, &ifglist, entry)
-		if (iface->ifindex == ifg->ifindex &&
-		    addr->s_addr == ifg->addr.s_addr)
-			break;
-	if (ifg == NULL) {
-		if ((ifg = calloc(1, sizeof(*ifg))) == NULL)
-			fatal("if_join_group");
-		ifg->addr.s_addr = addr->s_addr;
-		ifg->ifindex = iface->ifindex;
-		LIST_INSERT_HEAD(&ifglist, ifg, entry);
-	}
-
-	if (ifg->count++ != 0)
-		/* already joined */
-		return (0);
-
-	mreq.imr_multiaddr.s_addr = addr->s_addr;
-	mreq.imr_interface.s_addr = iface->addr.s_addr;
-
-	if (setsockopt(iface->discovery_fd, IPPROTO_IP,
-	    IP_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) < 0) {
-		log_warn("if_join_group: error IP_ADD_MEMBERSHIP, "
+	ret = setsockopt_ipv4_multicast (iface->discovery_fd,
+					 IP_ADD_MEMBERSHIP,
+					 addr->s_addr, iface->ifindex);
+	if (ret < 0)
+		zlog_warn("if_join_group: error IP_ADD_MEMBERSHIP, "
 		    "interface %s address %s", iface->name,
 		    inet_ntoa(*addr));
-		return (-1);
-	}
-	return (0);
+
+	return ret;
 }
 
 int
 if_leave_group(struct iface *iface, struct in_addr *addr)
 {
-	struct ip_mreq		 mreq;
-	struct if_group_count	*ifg;
+	int ret;
 
-	LIST_FOREACH(ifg, &ifglist, entry)
-		if (iface->ifindex == ifg->ifindex &&
-		    addr->s_addr == ifg->addr.s_addr)
-			break;
-
-	/* if interface is not found just try to drop membership */
-	if (ifg && --ifg->count != 0)
-		/* others still joined */
-		return (0);
-
-	mreq.imr_multiaddr.s_addr = addr->s_addr;
-	mreq.imr_interface.s_addr = iface->addr.s_addr;
-
-	if (setsockopt(iface->discovery_fd, IPPROTO_IP,
-	    IP_DROP_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) < 0) {
-		log_warn("if_leave_group: error IP_DROP_MEMBERSHIP, "
+	ret = setsockopt_ipv4_multicast (iface->discovery_fd,
+					 IP_DROP_MEMBERSHIP,
+					 addr->s_addr, iface->ifindex);
+	if (ret < 0)
+		zlog_warn("if_leave_group: error IP_DROP_MEMBERSHIP, "
 		    "interface %s address %s", iface->name,
 		    inet_ntoa(*addr));
-		return (-1);
-	}
 
-	if (ifg) {
-		LIST_REMOVE(ifg, entry);
-		free(ifg);
-	}
-	return (0);
+	return ret;
 }
 
 int
 if_set_mcast(struct iface *iface)
 {
-	if (setsockopt(iface->discovery_fd, IPPROTO_IP, IP_MULTICAST_IF,
-	    &iface->addr.s_addr, sizeof(iface->addr.s_addr)) < 0) {
-		log_debug("if_set_mcast: error setting "
-		    "IP_MULTICAST_IF, interface %s", iface->name);
+	if (setsockopt_ipv4_multicast_if (iface->discovery_fd,
+                                          iface->ifindex) < 0) {
+		zlog_warn ("Can't setsockopt IP_MULTICAST_IF on fd %d to "
+		    "ifindex %d for interface %s",
+		    iface->discovery_fd, iface->ifindex, iface->name);
 		return (-1);
 	}
 
@@ -469,7 +333,7 @@ if_set_mcast_loop(int fd)
 
 	if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP,
 	    (char *)&loop, sizeof(loop)) < 0) {
-		log_warn("if_set_mcast_loop: error setting IP_MULTICAST_LOOP");
+		zlog_warn("if_set_mcast_loop: error setting IP_MULTICAST_LOOP");
 		return (-1);
 	}
 

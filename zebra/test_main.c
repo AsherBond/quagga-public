@@ -35,6 +35,9 @@
 #include "zebra/debug.h"
 #include "zebra/router-id.h"
 #include "zebra/interface.h"
+#ifdef HAVE_MPLS
+#include "zebra/mpls_lib.h"
+#endif
 
 /* Zebra instance */
 struct zebra_t zebrad =
@@ -196,6 +199,12 @@ struct quagga_signal_t zebra_signals[] =
   },
 };
 
+#ifdef HAVE_MPLS
+void mpls_route_install_hook (struct route_node *rn) { return; }
+void mpls_route_uninstall_hook (struct route_node *rn) { return; }
+int mpls_enabled;
+#endif
+
 /* Main startup routine. */
 int
 main (int argc, char **argv)

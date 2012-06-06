@@ -40,6 +40,9 @@
 #include "zebra/redistribute.h"
 #include "zebra/debug.h"
 #include "zebra/irdp.h"
+#ifdef HAVE_MPLS
+#include "zebra/mpls_lib.h"
+#endif
 
 #ifdef RTADV
 /* Order is intentional.  Matches RFC4191.  This array is also used for
@@ -875,6 +878,53 @@ DEFUN_NOSH (zebra_interface,
   return ret;
 }
 
+#ifdef HAVE_MPLS
+DEFUN (if_mpls_ip,
+       if_mpls_ip_cmd,
+       "mpls ip",
+       "Configure MPLS interface parameters\n"
+       "Dynamic MPLS forwarding for IP\n")
+{
+  struct interface *ifp;
+  struct zebra_if *zebra_if;
+
+  ifp = vty->index;
+  zebra_if = ifp->info;
+  if (zebra_if->mpls_enabled)
+    return CMD_SUCCESS;
+
+  if (mpls_enabled && mpls_kernel_set_interface_labelspace (ifp, 0) < 0)
+    return CMD_WARNING;
+
+  zebra_if->mpls_enabled = 1;
+
+  return CMD_SUCCESS;
+}
+
+DEFUN (no_if_mpls_ip,
+       no_if_mpls_ip_cmd,
+       "no mpls ip",
+       NO_STR
+       "Configure MPLS interface parameters\n"
+       "Dynamic MPLS forwarding for IP\n")
+{
+  struct interface *ifp;
+  struct zebra_if *zebra_if;
+
+  ifp = vty->index;
+  zebra_if = ifp->info;
+  if (! zebra_if->mpls_enabled)
+    return CMD_SUCCESS;
+
+  if (mpls_enabled && mpls_kernel_set_interface_labelspace (ifp, -1) < 0)
+    return CMD_WARNING;
+
+  zebra_if->mpls_enabled = 0;
+
+  return CMD_SUCCESS;
+}
+#endif /* HAVE_MPLS */
+
 struct cmd_node interface_node =
 {
   INTERFACE_NODE,
@@ -1544,6 +1594,9 @@ if_config_write (struct vty *vty)
 	vty_out (vty, " description %s%s", ifp->desc,
 		 VTY_NEWLINE);
 
+      if (if_data->mpls_enabled)
+        vty_out (vty, " mpls ip%s", VTY_NEWLINE);
+
       /* Assign bandwidth here to avoid unnecessary interface flap
 	 while processing config script */
       if (ifp->bandwidth != 0)
@@ -1611,6 +1664,10 @@ zebra_if_init (void)
   install_element (ENABLE_NODE, &show_interface_desc_cmd);
   install_element (CONFIG_NODE, &zebra_interface_cmd);
   install_element (CONFIG_NODE, &no_interface_cmd);
+#ifdef HAVE_MPLS
+  install_element (INTERFACE_NODE, &if_mpls_ip_cmd);
+  install_element (INTERFACE_NODE, &no_if_mpls_ip_cmd);
+#endif /* HAVE_MPLS */
   install_default (INTERFACE_NODE);
   install_element (INTERFACE_NODE, &interface_desc_cmd);
   install_element (INTERFACE_NODE, &no_interface_desc_cmd);

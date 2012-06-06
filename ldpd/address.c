@@ -1,5 +1,3 @@
-/*	$OpenBSD: address.c,v 1.6 2010/11/04 09:52:16 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  *
@@ -16,28 +14,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
-
-#include <netinet/in.h>
-#include <netinet/in_systm.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <net/if_dl.h>
-#include <unistd.h>
-
-#include <errno.h>
-#include <event.h>
-#include <stdlib.h>
-#include <string.h>
+#include <zebra.h>
 
 #include "ldpd.h"
-#include "ldp.h"
-#include "log.h"
 #include "ldpe.h"
-
-extern struct ldpd_conf        *leconf;
+#include "lde.h"
+#include "ldp_debug.h"
 
 void	gen_address_list_tlv(struct ibuf *, struct iface *, u_int16_t);
 
@@ -51,16 +33,17 @@ send_address(struct nbr *nbr, struct iface *iface)
 	if (nbr->iface->passive)
 		return;
 
-	log_debug("send_address: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_send("send_address: neighbor ID %s", inet_ntoa(nbr->id));
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
 		fatal("send_address");
 
 	/* XXX: multiple address on the same iface? */
-	if (iface == NULL)
-		LIST_FOREACH(niface, &leconf->iface_list, entry)
-			iface_count++;
-	else
+	if (iface == NULL) {
+		LIST_FOREACH(niface, &ldpd_conf->iface_list, entry)
+			if (niface->addr.s_addr != INADDR_ANY)
+				iface_count++;
+	} else
 		iface_count = 1;
 
 	size = LDP_HDR_SIZE + sizeof(struct ldp_msg) +
@@ -71,12 +54,13 @@ send_address(struct nbr *nbr, struct iface *iface)
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_ADDR, size);
+	gen_msg_tlv(nbr, buf, MSG_TYPE_ADDR, size);
 
 	size -= sizeof(struct ldp_msg);
 
 	gen_address_list_tlv(buf, iface, size);
 
+	nbr_start_ktimer(nbr);
 	evbuf_enqueue(&nbr->wbuf, buf);
 }
 
@@ -88,13 +72,13 @@ recv_address(struct nbr *nbr, char *buf, u_int16_t len)
 	enum imsg_type		type;
 
 	if (nbr->state != NBR_STA_OPER) {
-		log_debug("recv_address: neighbor ID %s not operational",
+		zlog_warn("recv_address: neighbor ID %s not operational",
 		    inet_ntoa(nbr->id));
 		return (-1);
 	}
 
 	bcopy(buf, &addr, sizeof(addr));
-	log_debug("recv_address: neighbor ID %s%s", inet_ntoa(nbr->id),
+	log_pkt_recv("recv_address: neighbor ID %s%s", inet_ntoa(nbr->id),
 	    ntohs(addr.type) == MSG_TYPE_ADDR ? "" : " address withdraw");
 	if (ntohs(addr.type) == MSG_TYPE_ADDR)
 		type = IMSG_ADDRESS_ADD;
@@ -131,8 +115,7 @@ recv_address(struct nbr *nbr, char *buf, u_int16_t len)
 	len -= sizeof(alt);
 
 	while (len >= sizeof(struct in_addr)) {
-		ldpe_imsg_compose_lde(type, nbr->peerid, 0,
-		    buf, sizeof(struct in_addr));
+		lde_process(type, nbr->peerid, buf, sizeof(struct in_addr));
 
 		buf += sizeof(struct in_addr);
 		len -= sizeof(struct in_addr);
@@ -163,10 +146,11 @@ gen_address_list_tlv(struct ibuf *buf, struct iface *iface, u_int16_t size)
 
 	ibuf_add(buf, &alt, sizeof(alt));
 
-	if (iface == NULL)
-		LIST_FOREACH(niface, &leconf->iface_list, entry)
-			ibuf_add(buf, &niface->addr, sizeof(niface->addr));
-	else
+	if (iface == NULL) {
+		LIST_FOREACH(niface, &ldpd_conf->iface_list, entry)
+			if (niface->addr.s_addr != INADDR_ANY)
+				ibuf_add(buf, &niface->addr, sizeof(niface->addr));
+	} else
 		ibuf_add(buf, &iface->addr, sizeof(iface->addr));
 }
 
@@ -179,23 +163,25 @@ send_address_withdraw(struct nbr *nbr, struct iface *iface)
 	if (nbr->iface->passive)
 		return;
 
-	log_debug("send_address_withdraw: neighbor ID %s", inet_ntoa(nbr->id));
+	log_pkt_send("send_address_withdraw: neighbor ID %s", inet_ntoa(nbr->id));
 
 	if ((buf = ibuf_open(LDP_MAX_LEN)) == NULL)
 		fatal("send_address_withdraw");
 
 	/* XXX: multiple address on the same iface? */
-	size = LDP_HDR_SIZE + sizeof(struct ldp_msg) + sizeof(struct in_addr);
+	size = LDP_HDR_SIZE + sizeof(struct ldp_msg) +
+	    sizeof(struct address_list_tlv) + sizeof(struct in_addr);
 
 	gen_ldp_hdr(buf, nbr->iface, size);
 
 	size -= LDP_HDR_SIZE;
 
-	gen_msg_tlv(buf, MSG_TYPE_ADDRWITHDRAW, size);
+	gen_msg_tlv(nbr, buf, MSG_TYPE_ADDRWITHDRAW, size);
 
 	size -= sizeof(struct ldp_msg);
 
 	gen_address_list_tlv(buf, iface, size);
 
+	nbr_start_ktimer(nbr);
 	evbuf_enqueue(&nbr->wbuf, buf);
 }

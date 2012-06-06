@@ -1,5 +1,3 @@
-/*	$OpenBSD: imsg-buffer.c,v 1.1 2010/05/26 16:44:32 nicm Exp $	*/
-
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
  *
@@ -26,7 +24,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <bits/xopen_lim.h> 
+#include <bits/xopen_lim.h>
+
+#include "memory.h"
 
 #include "imsg.h"
 
@@ -39,12 +39,8 @@ ibuf_open(size_t len)
 {
 	struct ibuf	*buf;
 
-	if ((buf = calloc(1, sizeof(struct ibuf))) == NULL)
-		return (NULL);
-	if ((buf->buf = malloc(len)) == NULL) {
-		free(buf);
-		return (NULL);
-	}
+	buf = XCALLOC(MTYPE_LDP, sizeof(struct ibuf));
+	buf->buf = XMALLOC(MTYPE_LDP, len);
 	buf->size = buf->max = len;
 	buf->fd = -1;
 
@@ -79,7 +75,7 @@ ibuf_realloc(struct ibuf *buf, size_t len)
 		return (-1);
 	}
 
-	b = realloc(buf->buf, buf->wpos + len);
+	b = XREALLOC(MTYPE_LDP, buf->buf, buf->wpos + len);
 	if (b == NULL)
 		return (-1);
 	buf->buf = b;
@@ -180,8 +176,8 @@ ibuf_write(struct msgbuf *msgbuf)
 void
 ibuf_free(struct ibuf *buf)
 {
-	free(buf->buf);
-	free(buf);
+	XFREE(MTYPE_LDP, buf->buf);
+	XFREE(MTYPE_LDP, buf);
 }
 
 void

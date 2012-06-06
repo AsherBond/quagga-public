@@ -1,5 +1,3 @@
-/*	$OpenBSD: ldp.h,v 1.9 2011/01/10 11:58:39 claudio Exp $ */
-
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
  * Copyright (c) 2004, 2005, 2008 Esben Norby <norby@openbsd.org>
@@ -91,7 +89,7 @@ struct ldp_hdr {
 	u_int16_t		length;
 	u_int32_t		lsr_id;
 	u_int16_t		lspace_id;
-} __packed;
+};
 
 #define	LDP_HDR_SIZE		10
 #define	INFINITE_HOLDTIME	0xffff
@@ -109,7 +107,7 @@ struct ldp_msg {
 	u_int32_t	msgid;
 	/* Mandatory Parameters */
 	/* Optional Parameters */
-} __packed;
+};
 
 #define LDP_MSG_LEN		8
 
@@ -125,6 +123,12 @@ struct hello_prms_tlv {
 	u_int16_t	length;
 	u_int16_t	holdtime;
 	u_int16_t	flags;
+};
+
+struct opt_hello_prms_tlv {
+	u_int16_t	type;
+	u_int16_t	length;
+	u_int32_t	value;
 };
 
 #define HELLO_PRMS_SIZE		8
@@ -166,7 +170,7 @@ struct sess_prms_tlv {
 	u_int16_t	max_pdu_len;
 	u_int32_t	lsr_id;
 	u_int16_t	lspace_id;
-} __packed;
+};
 
 #define SESS_PRMS_SIZE		18
 
@@ -176,7 +180,7 @@ struct status_tlv {
 	u_int32_t	status_code;
 	u_int32_t	msg_id;
 	u_int16_t	msg_type;
-} __packed;
+};
 
 #define STATUS_SIZE		14
 #define STATUS_TLV_LEN		10
@@ -187,7 +191,7 @@ struct address_list_tlv {
 	u_int16_t	length;
 	u_int16_t	family;
 	/* address entries */
-} __packed;
+};
 
 #define	BASIC_LABEL_MAP_LEN	24
 
@@ -222,5 +226,9 @@ struct reqid_tlv {
 #define REQID_TLV_LEN		8
 
 #define	NO_LABEL		UINT_MAX
+#define MPLS_IPV4_EXPLICIT_NULL	0
+#define MPLS_IMPLICIT_NULL	3
+#define MPLS_LABEL_RESERVED_MAX	15
+#define MPLS_LABEL_MAX		1048575
 
 #endif /* !_LDP_H_ */

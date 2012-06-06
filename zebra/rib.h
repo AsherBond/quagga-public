@@ -77,6 +77,11 @@ struct rib
   u_char status;
 #define RIB_ENTRY_REMOVED	(1 << 0)
 
+#ifdef HAVE_MPLS
+  /* MPLS LSP. */
+  struct route_lsp *lsp;
+#endif
+
   /* Nexthop information. */
   u_char nexthop_num;
   u_char nexthop_active_num;
@@ -264,6 +269,12 @@ extern int rib_delete_ipv4 (int type, int flags, struct prefix_ipv4 *p,
 extern struct rib *rib_match_ipv4 (struct in_addr);
 
 extern struct rib *rib_lookup_ipv4 (struct prefix_ipv4 *);
+
+#ifdef HAVE_MPLS
+struct zebra_t;
+struct route_node;
+extern void rib_queue_add (struct zebra_t *, struct route_node *);
+#endif
 
 extern void rib_update (void);
 extern void rib_weed_tables (void);
