@@ -86,8 +86,10 @@ struct route_table
   void *info;					\
 						\
   /* Aggregation. */				\
-  void *aggregate;
-
+  void *aggregate;				\
+						\
+  /* MPLS label bindings. */			\
+  void *mpls;
 
 /* Each routing entry. */
 struct route_node

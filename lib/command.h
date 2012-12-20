@@ -73,8 +73,10 @@ enum node_type
   AAA_NODE,			/* AAA node. */
   KEYCHAIN_NODE,		/* Key-chain node. */
   KEYCHAIN_KEY_NODE,		/* Key-chain key node. */
+  LDP_NODE,			/* LDP protocol mode */
   INTERFACE_NODE,		/* Interface mode node. */
   ZEBRA_NODE,			/* zebra connection node. */
+  MPLS_NODE,			/* MPLS node. */
   TABLE_NODE,			/* rtm_table selection node. */
   RIP_NODE,			/* RIP protocol mode node. */ 
   RIPNG_NODE,			/* RIPng protocol mode node. */
@@ -305,6 +307,7 @@ struct desc
 "(neighbor|interface|area|lsa|zebra|config|dbex|spf|route|lsdb|redistribute|hook|asbr|prefix|abr)"
 #define ISIS_STR "IS-IS information\n"
 #define AREA_TAG_STR "[area tag]\n"
+#define LDP_STR "LDP information\n"
 
 #define CONF_BACKUP_EXT ".sav"
 
