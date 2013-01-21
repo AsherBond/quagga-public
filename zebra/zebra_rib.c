@@ -158,6 +158,9 @@ vrf_table (afi_t afi, safi_t safi, u_int32_t id)
   if (! vrf)
     return NULL;
 
+  if( afi >= AFI_MAX  || safi >= SAFI_MAX )
+    return NULL;
+
   return vrf->table[afi][safi];
 }
 
@@ -169,6 +172,9 @@ vrf_static_table (afi_t afi, safi_t safi, u_int32_t id)
 
   vrf = vrf_lookup (id);
   if (! vrf)
+    return NULL;
+
+  if( afi >= AFI_MAX  || safi >= SAFI_MAX )
     return NULL;
 
   return vrf->stable[afi][safi];

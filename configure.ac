@@ -7,7 +7,7 @@
 ##
 AC_PREREQ(2.53)
 
-AC_INIT(Quagga, 0.99.21, [https://bugzilla.quagga.net])
+AC_INIT(Quagga, 0.99.22-rc1, [https://bugzilla.quagga.net])
 AC_CONFIG_SRCDIR(lib/zebra.h)
 AC_CONFIG_MACRO_DIR([m4])
 
@@ -19,7 +19,7 @@ AC_CANONICAL_HOST()
 AC_CANONICAL_TARGET()
 
 AM_INIT_AUTOMAKE(1.6)
-AM_CONFIG_HEADER(config.h)
+AC_CONFIG_HEADERS(config.h)
 
 AC_PATH_PROG(PERL, perl)
 AC_CHECK_PROG([GAWK],[gawk],[gawk],[not-in-PATH])
@@ -129,7 +129,7 @@ AC_MSG_CHECKING([whether to set a default CFLAGS])
 if test "x${cflags_specified}" = "x" ; then
   case ${COMPILER} in
     "ICC")
-        CFLAGS="-Os -g -Wall -wd 279,869,981"
+        CFLAGS="-Os -g -Wall"
         AC_MSG_RESULT([Intel default])
         ;;
     "GCC")
@@ -195,10 +195,7 @@ AC_ARG_WITH(pkg-extra-version,
 	[EXTRAVERSION=$withval],)
 AC_ARG_WITH(pkg-git-version,
 	AS_HELP_STRING([--with-pkg-git-version], [add git information to MOTD and build version string]),
-	[ if test "x$withval" != "xno"; then
-		with_pkg_git_version="1"
-		AC_DEFINE(GIT_VERSION, [1], [include git version info])
-	fi ],)
+	[ test "x$withval" != "xno" && with_pkg_git_version="yes" ])
 AC_ARG_ENABLE(vtysh,
 [  --enable-vtysh          include integrated vty shell for Quagga])
 AC_ARG_ENABLE(ipv6,
@@ -273,6 +270,8 @@ AC_ARG_ENABLE(isis_topology,
 [  --enable-isis-topology        enable IS-IS topology generator])
 AC_ARG_ENABLE(capabilities,
 [  --disable-capabilities        disable using POSIX capabilities])
+AC_ARG_ENABLE(rusage,
+[  --disable-rusage              disable using getrusage])
 AC_ARG_ENABLE(gcc_ultra_verbose,
 [  --enable-gcc-ultra-verbose    enable ultra verbose GCC warnings])
 AC_ARG_ENABLE(linux24_tcp_md5,
@@ -414,7 +413,14 @@ if test "x${EXTRAVERSION}" != "x" ; then
   PACKAGE_STRING="${PACKAGE_STRING}${EXTRAVERSION}"
 fi
 
-AM_CONDITIONAL([GIT_VERSION], [test "x$with_pkg_git_version" != "x"])
+if test "x$with_pkg_git_version" = "xyes"; then
+	if test -d "${srcdir}/.git"; then
+		AC_DEFINE(GIT_VERSION, [1], [include git version info])
+	else	with_pkg_git_version="no"
+		AC_MSG_WARN([--with-pkg-git-version given, but this is not a git checkout])
+	fi
+fi
+AM_CONDITIONAL([GIT_VERSION], [test "x$with_pkg_git_version" = "xyes"])
 
 dnl ------------------------------------
 dnl Check C keywords and standard  types
@@ -469,6 +475,9 @@ m4_define([QUAGGA_INCLUDES],
 #endif
 #if HAVE_SYS_SOCKET_H
 # include <sys/socket.h>
+#endif
+#ifdef __APPLE__
+# define __APPLE_USE_RFC_3542
 #endif
 #if HAVE_NETINET_IN_H
 # include <netinet/in.h>
@@ -978,7 +987,7 @@ AC_CHECK_MEMBERS([struct ip_mreqn.imr_ifindex], [], [], QUAGGA_INCLUDES)
 AC_MSG_CHECKING([for BSD struct ip_mreq hack])
 AC_TRY_COMPILE([#ifdef HAVE_SYS_PARAM_H
 #include <sys/param.h>
-#endif],[#if (defined(__FreeBSD__) && ((__FreeBSD_version >= 500022 && __FreeBSD_version < 700000) || (__FreeBSD_version < 500000 && __FreeBSD_version >= 440000))) || (defined(__NetBSD__) && defined(__NetBSD_Version__) && __NetBSD_Version__ >= 106010000) || defined(__OpenBSD__)
+#endif],[#if (defined(__FreeBSD__) && ((__FreeBSD_version >= 500022 && __FreeBSD_version < 700000) || (__FreeBSD_version < 500000 && __FreeBSD_version >= 440000))) || (defined(__NetBSD__) && defined(__NetBSD_Version__) && __NetBSD_Version__ >= 106010000) || defined(__OpenBSD__) || defined(__APPLE__)
   return (0);
 #else
   #error No support for BSD struct ip_mreq hack detected
@@ -1496,6 +1505,7 @@ AC_CHECK_TYPES([struct sockaddr, struct sockaddr_in,
 AC_CHECK_MEMBERS([struct sockaddr.sa_len,
 	struct sockaddr_in.sin_len, struct sockaddr_un.sun_len,
 	struct sockaddr_in6.sin6_scope_id,
+	struct sockaddr_dl.sdl_len,
 	struct if6_aliasreq.ifra_lifetime,
 	struct nd_opt_adv_interval.nd_opt_ai_type],
 	[], [], QUAGGA_INCLUDES)
@@ -1518,12 +1528,13 @@ AC_CHECK_TYPES([struct in_pktinfo],
 dnl --------------------------------------
 dnl checking for getrusage struct and call
 dnl --------------------------------------
-AC_MSG_CHECKING(whether getrusage is available)
-AC_TRY_COMPILE([#include <sys/resource.h>
-],[struct rusage ac_x; getrusage (RUSAGE_SELF, &ac_x);],
-[AC_MSG_RESULT(yes)
- AC_DEFINE(HAVE_RUSAGE,,rusage)],
- AC_MSG_RESULT(no))
+if test "${enable_rusage}" != "no"; then
+  AC_MSG_CHECKING(whether getrusage is available)
+  AC_TRY_COMPILE([#include <sys/resource.h>],[struct rusage ac_x; getrusage (RUSAGE_SELF, &ac_x);],
+    [AC_MSG_RESULT(yes)
+     AC_DEFINE(HAVE_RUSAGE,,rusage)],
+      AC_MSG_RESULT(no))
+fi
 
 dnl --------------------------------------
 dnl checking for clock_time monotonic struct and call
@@ -1571,6 +1582,22 @@ if test "${enable_capabilities}" != "no"; then
   fi
 fi
 AC_SUBST(LIBCAP)
+
+dnl ---------------------------------------------------------------------------
+dnl http://www.gnu.org/software/autoconf-archive/ax_sys_weak_alias.html
+dnl Check for and set one of the following = 1
+dnl   HAVE_SYS_WEAK_ALIAS_ATTRIBUTE
+dnl   HAVE_SYS_WEAK_ALIAS_PRAGMA
+dnl   HAVE_SYS_WEAK_ALIAS_HPSECONDARY
+dnl   HAVE_SYS_WEAK_ALIAS_CRIDUPLICATE
+dnl If any scheme is found, set
+dnl   HAVE_SYS_WEAK_ALIAS=1
+dnl The following variable is set to text value
+dnl   WEAK_ALIAS = "attribute" || "pragma" || "hpsecondary" || "criduplicate" || "no"
+dnl If weak alias can cross object file boundaries
+dnl   WEAK_ALIAS_CROSSFILE = "yes" || "no"
+dnl ---------------------------------------------------------------------------
+AX_SYS_WEAK_ALIAS
 
 dnl ---------------------------
 dnl check for glibc 'backtrace'

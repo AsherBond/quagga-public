@@ -677,7 +677,8 @@ bgp_write (struct thread *thread)
 
 	  /* Flush any existing events */
 	  BGP_EVENT_ADD (peer, BGP_Stop);
-	  return 0;
+	  goto done;
+
 	case BGP_MSG_KEEPALIVE:
 	  peer->keepalive_out++;
 	  break;
@@ -698,9 +699,9 @@ bgp_write (struct thread *thread)
   
   if (bgp_write_proceed (peer))
     BGP_WRITE_ON (peer->t_write, bgp_write, peer->fd);
-  else
-    sockopt_cork (peer->fd, 0);
-  
+
+ done:
+  sockopt_cork (peer->fd, 0);
   return 0;
 }
 
@@ -722,12 +723,20 @@ bgp_write_notify (struct peer *peer)
   val = fcntl (peer->fd, F_GETFL, 0);
   fcntl (peer->fd, F_SETFL, val & ~O_NONBLOCK);
 
-  ret = writen (peer->fd, STREAM_DATA (s), stream_get_endp (s));
+  /* Stop collecting data within the socket */
+  sockopt_cork (peer->fd, 0);
+
+  ret = write (peer->fd, STREAM_DATA (s), stream_get_endp (s));
   if (ret <= 0)
     {
       BGP_EVENT_ADD (peer, TCP_fatal_error);
       return 0;
     }
+
+  /* Disable Nagle, make NOTIFY packet go out right away */
+  val = 1;
+  (void) setsockopt (peer->fd, IPPROTO_TCP, TCP_NODELAY,
+                            (char *) &val, sizeof (val));
 
   /* Retrieve BGP packet type. */
   stream_set_getp (s, BGP_MARKER_SIZE + 2);
@@ -1411,14 +1420,16 @@ bgp_open_receive (struct peer *peer, bgp_size_t size)
   /* Peer BGP version check. */
   if (version != BGP_VERSION_4)
     {
-      u_int8_t maxver = BGP_VERSION_4;
+      u_int16_t maxver = htons(BGP_VERSION_4);
+      /* XXX this reply may not be correct if version < 4  XXX */
       if (BGP_DEBUG (normal, NORMAL))
 	zlog_debug ("%s bad protocol version, remote requested %d, local request %d",
 		   peer->host, version, BGP_VERSION_4);
+      /* Data must be in network byte order here */
       bgp_notify_send_with_data (peer, 
 				 BGP_NOTIFY_OPEN_ERR, 
 				 BGP_NOTIFY_OPEN_UNSUP_VERSION,
-				 &maxver, 1);
+				 (u_int8_t *) &maxver, 2);
       return -1;
     }
 
@@ -2383,6 +2394,15 @@ bgp_marker_all_one (struct stream *s, int length)
   return 1;
 }
 
+/* Recent thread time.
+   On same clock base as bgp_clock (MONOTONIC)
+   but can be time of last context switch to bgp_read thread. */
+static time_t
+bgp_recent_clock (void)
+{
+  return recent_relative_time().tv_sec;
+}
+
 /* Starting point of packet process function. */
 int
 bgp_read (struct thread *thread)
@@ -2511,14 +2531,14 @@ bgp_read (struct thread *thread)
       bgp_open_receive (peer, size); /* XXX return value ignored! */
       break;
     case BGP_MSG_UPDATE:
-      peer->readtime = time(NULL);    /* Last read timer reset */
+      peer->readtime = bgp_recent_clock ();
       bgp_update_receive (peer, size);
       break;
     case BGP_MSG_NOTIFY:
       bgp_notify_receive (peer, size);
       break;
     case BGP_MSG_KEEPALIVE:
-      peer->readtime = time(NULL);    /* Last read timer reset */
+      peer->readtime = bgp_recent_clock ();
       bgp_keepalive_receive (peer, size);
       break;
     case BGP_MSG_ROUTE_REFRESH_NEW:

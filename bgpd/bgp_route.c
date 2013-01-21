@@ -1695,6 +1695,7 @@ bgp_process (struct bgp *bgp, struct bgp_node *rn, afi_t afi, safi_t safi)
         break;
     }
   
+  SET_FLAG (rn->flags, BGP_NODE_PROCESS_SCHEDULED);
   return;
 }
 
@@ -2461,8 +2462,9 @@ bgp_default_originate (struct peer *peer, afi_t afi, safi_t safi, int withdraw)
   struct attr attr;
   struct aspath *aspath;
   struct prefix p;
-  struct bgp_info binfo;
   struct peer *from;
+  struct bgp_node *rn;
+  struct bgp_info *ri;
   int ret = RMAP_DENYMATCH;
   
   if (!(afi == AFI_IP || afi == AFI_IP6))
@@ -2504,21 +2506,37 @@ bgp_default_originate (struct peer *peer, afi_t afi, safi_t safi, int withdraw)
 
   if (peer->default_rmap[afi][safi].name)
     {
-      binfo.peer = bgp->peer_self;
-      binfo.attr = &attr;
-
       SET_FLAG (bgp->peer_self->rmap_type, PEER_RMAP_TYPE_DEFAULT);
+      for (rn = bgp_table_top(bgp->rib[afi][safi]); rn; rn = bgp_route_next(rn))
+        {
+          for (ri = rn->info; ri; ri = ri->next)
+            {
+              struct attr dummy_attr;
+              struct attr_extra dummy_extra;
+              struct bgp_info info;
 
-      ret = route_map_apply (peer->default_rmap[afi][safi].map, &p,
-			     RMAP_BGP, &binfo);
+              /* Provide dummy so the route-map can't modify the attributes */
+              dummy_attr.extra = &dummy_extra;
+              bgp_attr_dup(&dummy_attr, ri->attr);
+              info.peer = ri->peer;
+              info.attr = &dummy_attr;
 
+              ret = route_map_apply(peer->default_rmap[afi][safi].map, &rn->p,
+                                    RMAP_BGP, &info);
+
+              /* The route map might have set attributes. If we don't flush them
+               * here, they will be leaked. */
+              bgp_attr_flush(&dummy_attr);
+              if (ret != RMAP_DENYMATCH)
+                break;
+            }
+          if (ret != RMAP_DENYMATCH)
+            break;
+        }
       bgp->peer_self->rmap_type = 0;
 
       if (ret == RMAP_DENYMATCH)
-	{
-	  bgp_attr_flush (&attr);
-	  withdraw = 1;
-	}
+        withdraw = 1;
     }
 
   if (withdraw)
@@ -2529,8 +2547,11 @@ bgp_default_originate (struct peer *peer, afi_t afi, safi_t safi, int withdraw)
     }
   else
     {
-      SET_FLAG (peer->af_sflags[afi][safi], PEER_STATUS_DEFAULT_ORIGINATE);
-      bgp_default_update_send (peer, &attr, afi, safi, from);
+      if (! CHECK_FLAG (peer->af_sflags[afi][safi], PEER_STATUS_DEFAULT_ORIGINATE))
+        {
+          SET_FLAG (peer->af_sflags[afi][safi], PEER_STATUS_DEFAULT_ORIGINATE);
+          bgp_default_update_send (peer, &attr, afi, safi, from);
+        }
     }
   
   bgp_attr_extra_free (&attr);
@@ -2810,9 +2831,6 @@ bgp_clear_route_table (struct peer *peer, afi_t afi, safi_t safi,
       struct bgp_info *ri;
       struct bgp_adj_in *ain;
       struct bgp_adj_out *aout;
-      
-      if (rn->info == NULL)
-        continue;
 
       /* XXX:TODO: This is suboptimal, every non-empty route_node is
        * queued for every clearing peer, regardless of whether it is
@@ -2845,6 +2863,21 @@ bgp_clear_route_table (struct peer *peer, afi_t afi, safi_t safi,
        * this may actually be achievable. It doesn't seem to be a huge
        * problem at this time,
        */
+      for (ain = rn->adj_in; ain; ain = ain->next)
+        if (ain->peer == peer || purpose == BGP_CLEAR_ROUTE_MY_RSCLIENT)
+          {
+            bgp_adj_in_remove (rn, ain);
+            bgp_unlock_node (rn);
+            break;
+          }
+      for (aout = rn->adj_out; aout; aout = aout->next)
+        if (aout->peer == peer || purpose == BGP_CLEAR_ROUTE_MY_RSCLIENT)
+          {
+            bgp_adj_out_remove (rn, aout, peer, afi, safi);
+            bgp_unlock_node (rn);
+            break;
+          }
+
       for (ri = rn->info; ri; ri = ri->next)
         if (ri->peer == peer || purpose == BGP_CLEAR_ROUTE_MY_RSCLIENT)
           {
@@ -2858,21 +2891,6 @@ bgp_clear_route_table (struct peer *peer, afi_t afi, safi_t safi,
             cnq->rn = rn;
             cnq->purpose = purpose;
             work_queue_add (peer->clear_node_queue, cnq);
-            break;
-          }
-
-      for (ain = rn->adj_in; ain; ain = ain->next)
-        if (ain->peer == peer || purpose == BGP_CLEAR_ROUTE_MY_RSCLIENT)
-          {
-            bgp_adj_in_remove (rn, ain);
-            bgp_unlock_node (rn);
-            break;
-          }
-      for (aout = rn->adj_out; aout; aout = aout->next)
-        if (aout->peer == peer || purpose == BGP_CLEAR_ROUTE_MY_RSCLIENT)
-          {
-            bgp_adj_out_remove (rn, aout, peer, afi, safi);
-            bgp_unlock_node (rn);
             break;
           }
     }
